@@ -38,13 +38,26 @@ def extract_server_names(changed_files: list[str]) -> list[str]:
     return sorted(servers)
 
 
-def main():
-    base_ref = "HEAD~1"
-    if len(sys.argv) > 2 and sys.argv[1] == "--base-ref":
-        base_ref = sys.argv[2]
+def get_all_servers() -> list[str]:
+    """Return all server folders that have a server.py entrypoint."""
+    servers_dir = Path("servers")
+    if not servers_dir.is_dir():
+        return []
+    return sorted(
+        d.name for d in servers_dir.iterdir()
+        if d.is_dir() and (d / "server.py").exists()
+    )
 
-    changed_files = get_changed_files(base_ref)
-    servers = extract_server_names(changed_files)
+
+def main():
+    if "--all" in sys.argv:
+        servers = get_all_servers()
+    else:
+        base_ref = "HEAD~1"
+        if len(sys.argv) > 2 and sys.argv[1] == "--base-ref":
+            base_ref = sys.argv[2]
+        changed_files = get_changed_files(base_ref)
+        servers = extract_server_names(changed_files)
 
     print(json.dumps(servers))
 

@@ -6,6 +6,11 @@ on:
     paths:
       - "servers/**"
       - "shared/**"
+  workflow_dispatch:
+    inputs:
+      server:
+        description: "Server folder name to deploy (e.g. effis)"
+        required: true
 
 permissions:
   id-token: write
@@ -33,7 +38,12 @@ jobs:
       - name: Detect changed MCP servers
         id: detect
         run: |
-          SERVERS=$(python scripts/detect_changed.py)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SERVERS='["${{ github.event.inputs.server }}"]'
+            echo "Manual trigger: deploying ${{ github.event.inputs.server }}"
+          else
+            SERVERS=$(python scripts/detect_changed.py)
+          fi
           echo "servers=$SERVERS" >> "$GITHUB_OUTPUT"
           if [ "$SERVERS" = "[]" ]; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
