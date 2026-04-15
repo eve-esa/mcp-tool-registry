@@ -57,12 +57,14 @@ def build_and_push_image(server_name: str, account_id: str, region: str) -> str:
         check=True,
     )
 
-    print(f"  Building image for {server_name}...")
+    print(f"  Building image for {server_name} (linux/arm64)...")
     subprocess.run(
         [
-            "docker", "build",
+            "docker", "buildx", "build",
+            "--platform", "linux/arm64",
             "-f", "shared/Dockerfile",
             "-t", image_uri,
+            "--load",
             f"servers/{server_name}",
         ],
         check=True,
