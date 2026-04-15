@@ -53,6 +53,7 @@ def build_and_push_image(server_name: str, account_id: str, region: str) -> str:
             f"{account_id}.dkr.ecr.{region}.amazonaws.com",
         ],
         input=login_pw.stdout,
+        text=True,
         check=True,
     )
 
