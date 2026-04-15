@@ -1,0 +1,138 @@
+name: Deploy MCP servers to AgentCore
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "servers/**"
+      - "shared/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+
+jobs:
+  # ─── Detect which server folders changed ───────────────────────────────
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      servers: ${{ steps.detect.outputs.servers }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Detect changed MCP servers
+        id: detect
+        run: |
+          SERVERS=$(python scripts/detect_changed.py)
+          echo "servers=$SERVERS" >> "$GITHUB_OUTPUT"
+          if [ "$SERVERS" = "[]" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No MCP server changes detected."
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Changed servers: $SERVERS"
+          fi
+
+  # ─── Build and deploy each changed server ──────────────────────────────
+  deploy:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      fail-fast: false
+      matrix:
+        server: ${{ fromJson(needs.detect-changes.outputs.servers) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install deploy dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-eve-tools-agentcore-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Inject runtime secrets from GitHub Secrets into .env file.
+      # The .env.template in each server lists the NAMES it needs;
+      # envsubst fills in the VALUES from the environment.
+      - name: Inject runtime secrets
+        env:
+          CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
+          CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
+        run: |
+          TEMPLATE="servers/${{ matrix.server }}/.env.template"
+          TARGET="servers/${{ matrix.server }}/.env"
+          if [ -f "$TEMPLATE" ]; then
+            envsubst < "$TEMPLATE" > "$TARGET"
+            echo "Created .env for ${{ matrix.server }} from template"
+          else
+            echo "No .env.template found — skipping secret injection"
+          fi
+
+      - name: Deploy ${{ matrix.server }}
+        run: |
+          python scripts/deploy_server.py \
+            --server-name "${{ matrix.server }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --account-id "${{ secrets.AWS_ACCOUNT_ID }}" \
+            --execution-role-arn "${{ secrets.AGENTCORE_EXECUTION_ROLE_ARN }}" \
+            --cognito-discovery-url "${{ secrets.COGNITO_DISCOVERY_URL }}" \
+            --cognito-client-id "${{ secrets.COGNITO_CLIENT_ID }}"
+
+  # ─── Smoke test deployed servers ───────────────────────────────────────
+  smoke-test:
+    needs: [detect-changes, deploy]
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      matrix:
+        server: ${{ fromJson(needs.detect-changes.outputs.servers) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-eve-tools-agentcore-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Smoke test ${{ matrix.server }}
+        run: |
+          python -c "
+          import boto3
+          client = boto3.client('bedrock-agentcore', region_name='${{ env.AWS_REGION }}')
+          runtime = client.get_agent_runtime(agentRuntimeName='${{ matrix.server }}')
+          status = runtime.get('agentRuntimeStatus', 'UNKNOWN')
+          print(f'Server ${{ matrix.server }}: {status}')
+          assert status in ('READY', 'ACTIVE', 'CREATING'), f'Unexpected status: {status}'
+          print('Smoke test passed.')
+          "
