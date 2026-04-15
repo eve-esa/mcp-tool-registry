@@ -74,6 +74,22 @@ def build_and_push_image(server_name: str, account_id: str, region: str) -> str:
     return image_uri
 
 
+def find_runtime_by_name(client, name: str) -> dict | None:
+    """Look up an AgentCore runtime by name. Returns the runtime dict or None."""
+    paginator_token = None
+    while True:
+        kwargs = {"maxResults": 100}
+        if paginator_token:
+            kwargs["nextToken"] = paginator_token
+        response = client.list_agent_runtimes(**kwargs)
+        for runtime in response.get("agentRuntimes", []):
+            if runtime.get("agentRuntimeName") == name:
+                return runtime
+        paginator_token = response.get("nextToken")
+        if not paginator_token:
+            return None
+
+
 def deploy_to_agentcore(
     server_name: str,
     image_uri: str,
@@ -82,23 +98,27 @@ def deploy_to_agentcore(
     cognito_discovery_url: str | None = None,
     cognito_client_id: str | None = None,
 ) -> str:
-    client = boto3.client("bedrock-agentcore", region_name=region)
+    client = boto3.client("bedrock-agentcore-control", region_name=region)
 
-    try:
-        existing = client.get_agent_runtime(agentRuntimeName=server_name)
+    existing = find_runtime_by_name(client, server_name)
+
+    if existing:
+        runtime_id = existing["agentRuntimeId"]
         runtime_arn = existing["agentRuntimeArn"]
         print(f"  Updating existing runtime: {runtime_arn}")
 
         client.update_agent_runtime(
-            agentRuntimeName=server_name,
+            agentRuntimeId=runtime_id,
             agentRuntimeArtifact={
                 "containerConfiguration": {"containerUri": image_uri}
             },
+            roleArn=execution_role_arn,
+            networkConfiguration={"networkMode": "PUBLIC"},
         )
         print(f"  Updated:  {runtime_arn}")
         return runtime_arn
 
-    except client.exceptions.ResourceNotFoundException:
+    else:
         print(f"  Creating new runtime: {server_name}")
 
         create_kwargs = {
