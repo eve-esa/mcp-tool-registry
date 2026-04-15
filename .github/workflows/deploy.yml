@@ -84,17 +84,30 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # Inject runtime secrets from GitHub Secrets into .env file.
-      # The .env.template in each server lists the NAMES it needs;
-      # envsubst fills in the VALUES from the environment.
+      # Reads ${VAR_NAME} placeholders from the server's .env.template
+      # and resolves each from the full secrets context automatically.
+      # Adding a new server with new secrets requires NO workflow changes —
+      # just add the GitHub Secrets and reference them in .env.template.
       - name: Inject runtime secrets
         env:
-          CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
-          CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
+          ALL_SECRETS: ${{ toJson(secrets) }}
+          TEMPLATE_PATH: servers/${{ matrix.server }}/.env.template
+          TARGET_PATH: servers/${{ matrix.server }}/.env
         run: |
-          TEMPLATE="servers/${{ matrix.server }}/.env.template"
-          TARGET="servers/${{ matrix.server }}/.env"
-          if [ -f "$TEMPLATE" ]; then
-            envsubst < "$TEMPLATE" > "$TARGET"
+          if [ -f "$TEMPLATE_PATH" ]; then
+            python3 -c '
+          import json, os, re
+          secrets = json.loads(os.environ["ALL_SECRETS"])
+          template = open(os.environ["TEMPLATE_PATH"]).read()
+          def replace(m):
+              key = m.group(1)
+              val = secrets.get(key, "")
+              if not val:
+                  print(f"  WARNING: secret {key} not found in GitHub Secrets")
+              return val
+          result = re.sub(r"\$\{(\w+)\}", replace, template)
+          open(os.environ["TARGET_PATH"], "w").write(result)
+          '
             echo "Created .env for ${{ matrix.server }} from template"
           else
             echo "No .env.template found — skipping secret injection"
