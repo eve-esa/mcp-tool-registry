@@ -11,6 +11,9 @@ Checks performed (exit code 1 on any failure):
     7. File size guard     — no file exceeds MAX_FILE_SIZE_MB
     8. Hardcoded secrets   — scan source files for inline credentials
 
+Non-blocking checks (warnings only — do NOT fail the build):
+    9. Ruff lint           — run ruff on the server directory, report findings
+
 Usage:
     python scripts/validate_pr.py                     # auto-detect via git diff
     python scripts/validate_pr.py --base-ref origin/main
@@ -377,6 +380,39 @@ def check_hardcoded_secrets(changed_files: list[str]) -> list[ValidationError]:
     return errors
 
 
+def run_ruff_lint(server_name: str) -> bool:
+    """Run ruff on the server directory, printing GitHub annotations.
+
+    Uses ruff's built-in ``--output-format=github`` so findings appear as
+    inline annotations on the PR diff.  Returns True if warnings were found.
+
+    Reference: https://docs.astral.sh/ruff/configuration/#output-format
+    """
+    server_dir = Path("servers") / server_name
+    if not server_dir.is_dir():
+        return False
+
+    try:
+        result = subprocess.run(
+            ["ruff", "check", "--output-format=github", str(server_dir)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        print("  ruff not installed — skipping lint check")
+        return False
+    except subprocess.TimeoutExpired:
+        print("  ruff timed out — skipping lint check")
+        return False
+
+    output = result.stdout.strip()
+    if output:
+        print(output)
+        return True
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate PR against monorepo conventions")
     parser.add_argument(
@@ -418,6 +454,11 @@ def main() -> None:
     if infra_files:
         print(f"::warning::PR modifies shared infrastructure: {', '.join(infra_files)}")
 
+    has_lint_warnings = False
+    for server_name in servers:
+        if run_ruff_lint(server_name):
+            has_lint_warnings = True
+
     if all_errors:
         print(f"\n{'='*60}")
         print(f"  PR VALIDATION FAILED — {len(all_errors)} error(s)")
@@ -432,6 +473,8 @@ def main() -> None:
         print(f"{'='*60}")
         print(f"  Changed files: {len(changed_files)}")
         print(f"  Servers touched: {', '.join(sorted(servers)) or 'none'}")
+        if has_lint_warnings:
+            print("  ⚠ Ruff found lint warnings — review recommended")
         if infra_files:
             print("  ⚠ Infrastructure files changed (requires maintainer review)")
         print()

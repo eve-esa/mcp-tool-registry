@@ -67,13 +67,13 @@ async def test_retrieve(
     print(f"  documents:      {len(docs)}")
 
     if latencies:
-        print(f"\n  Latencies:")
+        print("\n  Latencies:")
         for key, val in latencies.items():
             if val is not None:
                 print(f"    {key}: {val}")
 
     if docs:
-        print(f"\n  Retrieved documents:")
+        print("\n  Retrieved documents:")
         for i, doc in enumerate(docs):
             score = doc.get("score")
             rerank = doc.get("reranking_score")
@@ -99,7 +99,7 @@ async def test_retrieve(
 
 async def test_login():
     """Verify that login works and a token is obtained."""
-    from server import _login, _access_token
+    from server import _login
 
     print("=" * 60)
     print("TEST: login")

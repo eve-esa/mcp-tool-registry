@@ -15,10 +15,8 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import subprocess
-import sys
 
 import boto3
 
@@ -70,7 +68,7 @@ def build_and_push_image(server_name: str, account_id: str, region: str) -> str:
         check=True,
     )
 
-    print(f"  Pushing to ECR...")
+    print("  Pushing to ECR...")
     subprocess.run(["docker", "push", image_uri], check=True)
 
     return image_uri

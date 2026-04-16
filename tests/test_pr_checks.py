@@ -32,6 +32,7 @@ from validate_pr import (  # noqa: E402, I001
     check_single_server,
     extract_server_names,
     has_infra_changes,
+    run_ruff_lint,
 )
 
 VALID_SERVER_PY = textwrap.dedent("""\
@@ -431,7 +432,41 @@ class TestExtractServerNames:
         assert extract_server_names(files) == {"deep"}
 
 
-# ─── 11. Valid servers pass all checks (integration) ────────────────────
+# ─── 11. Ruff lint (non-blocking) ────────────────────────────────────────
+
+
+class TestRuffLint:
+    def test_clean_code_no_warnings(self, server_dir: Path):
+        assert run_ruff_lint("test-server") is False
+
+    def test_unused_import_produces_warning(self, server_dir: Path):
+        code = VALID_SERVER_PY + "import json\n"
+        (server_dir / "server.py").write_text(code)
+        assert run_ruff_lint("test-server") is True
+
+    def test_nonexistent_server_returns_false(self, server_dir: Path):
+        assert run_ruff_lint("no-such-server") is False
+
+    def test_multiple_issues_still_true(self, server_dir: Path):
+        bad_code = textwrap.dedent("""\
+            import os
+            import sys
+            import json
+            from mcp.server.fastmcp import FastMCP
+            mcp = FastMCP("Test", host="0.0.0.0", port=8000, stateless_http=True)
+
+            @mcp.tool()
+            async def ping() -> str:
+                return "pong"
+
+            if __name__ == "__main__":
+                mcp.run(transport="streamable-http")
+        """)
+        (server_dir / "server.py").write_text(bad_code)
+        assert run_ruff_lint("test-server") is True
+
+
+# ─── 12. Valid servers pass all checks (integration) ────────────────────
 
 
 class TestValidServerIntegration:

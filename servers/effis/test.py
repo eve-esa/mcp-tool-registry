@@ -34,7 +34,7 @@ from pathlib import Path
 def test_shapefile_direct(shapefile_dir: str, date: str, bbox: str, max_features: int):
     """Test the shapefile reader directly (no MCP, no async)."""
     print("=" * 60)
-    print(f"TEST: Direct shapefile read")
+    print("TEST: Direct shapefile read")
     print(f"  shapefile_dir: {shapefile_dir}")
     print(f"  date:          {date}")
     print(f"  bbox:          {bbox}")
@@ -59,7 +59,7 @@ def test_shapefile_direct(shapefile_dir: str, date: str, bbox: str, max_features
     print(f"   Features found: {len(features)}")
 
     if features:
-        print(f"\n   First 5 features:")
+        print("\n   First 5 features:")
         for i, f in enumerate(features[:5]):
             props = f.get("properties", {})
             print(f"   [{i}] {props.get('FIREDATE', '?')} | "
@@ -76,7 +76,7 @@ def test_shapefile_direct(shapefile_dir: str, date: str, bbox: str, max_features
             except (ValueError, TypeError):
                 pass
         if areas:
-            print(f"\n   Area stats:")
+            print("\n   Area stats:")
             print(f"     Total:   {sum(areas):.0f} ha")
             print(f"     Largest: {max(areas):.0f} ha")
             print(f"     Count:   {len(areas)} fires")
@@ -100,7 +100,7 @@ async def test_mcp_tool(shapefile_dir: str | None, date: str | None,
                         bbox: str, max_features: int):
     """Test the full MCP tool (async, includes WMS image download)."""
     print("=" * 60)
-    print(f"TEST: Full MCP tool (get_effis_burnt_areas)")
+    print("TEST: Full MCP tool (get_effis_burnt_areas)")
     print(f"  shapefile_dir: {shapefile_dir or 'None (WFS mode)'}")
     print(f"  date:          {date}")
     print(f"  bbox:          {bbox}")
@@ -151,7 +151,7 @@ async def test_mcp_tool(shapefile_dir: str | None, date: str | None,
     geojson = result.get("geojson", {})
     features = geojson.get("features", [])
     if features:
-        print(f"\n   First 5 features:")
+        print("\n   First 5 features:")
         for i, f in enumerate(features[:5]):
             props = f.get("properties", {})
             print(f"   [{i}] {props.get('FIREDATE', '?')} | "
@@ -234,7 +234,7 @@ async def test_compute_metrics(
 
     # Summary
     summary = result.get("summary", {})
-    print(f"\n   Observations:")
+    print("\n   Observations:")
     print(f"     pre-fire:     {summary.get('pre_fire_observations', '?')}")
     print(f"     post-fire:    {summary.get('post_fire_observations', '?')}")
 
@@ -281,7 +281,7 @@ async def test_compute_metrics(
         else:
             table = recovery.get("table", [])
             steps = recovery.get("time_steps", [])
-            print(f"\n   Recovery (VRR):")
+            print("\n   Recovery (VRR):")
             print(f"     Time steps: {steps}")
             for row in table:
                 ts = row.get("Time step", "?")
@@ -302,7 +302,7 @@ async def test_compute_metrics(
 def test_shapefile_fields(shapefile_dir: str):
     """Print shapefile metadata: fields, record count, date range."""
     print("=" * 60)
-    print(f"TEST: Shapefile metadata")
+    print("TEST: Shapefile metadata")
     print(f"  shapefile_dir: {shapefile_dir}")
     print("=" * 60)
 
@@ -333,7 +333,7 @@ def test_shapefile_fields(shapefile_dir: str):
 
     # Sample 5 random records
     import random
-    print(f"\n   5 random samples:")
+    print("\n   5 random samples:")
     indices = random.sample(range(len(sf)), min(5, len(sf)))
     for idx in sorted(indices):
         rec = sf.record(idx)
@@ -355,7 +355,7 @@ def test_build_recovery_table():
     print("=" * 60)
 
     sys.path.insert(0, str(Path(__file__).parent))
-    from server import build_recovery_table, _compute_severity_map
+    from server import _compute_severity_map, build_recovery_table
 
     H, W = 20, 20
     bands = {"red": 0, "nir": 1}
@@ -418,8 +418,8 @@ def test_build_recovery_table():
     print(f"    T+12mo: VRR={vrr_12:.2f}% (expected ~66.67%) ✅")
     print(f"    T+24mo: VRR={vrr_24:.2f}% (expected 100%)    ✅")
     print(f"    T+36mo: VRR={vrr_36:.2f}% (expected >100%)   ✅")
-    print(f"    Classification columns present               ✅")
-    print(f"    Class assignment correct                     ✅")
+    print("    Classification columns present               ✅")
+    print("    Class assignment correct                     ✅")
 
     # Test guard condition: when NDVI_pre ≈ NDVI_dist (denom → 0)
     img_same = _make_img(0.20, 0.30)  # same as disturbance
@@ -431,7 +431,7 @@ def test_build_recovery_table():
     print(f"\n  Guard test (NDVI_pre ≈ NDVI_dist): VRR={vrr_guard}")
     # Should be NaN (denom → 0) — nanmean of all-NaN = NaN
     assert np.isnan(vrr_guard) or vrr_guard != vrr_guard, "Expected NaN when denom ≈ 0"
-    print(f"    Denominator guard (NaN) works                ✅")
+    print("    Denominator guard (NaN) works                ✅")
 
     print("\n✅ All build_recovery_table tests passed!")
 
