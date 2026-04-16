@@ -174,9 +174,7 @@ async def retrieve(
     resp = await _authed_post("/retrieve", body)
 
     if resp.status_code != 200:
-        return json.dumps(
-            {"error": f"EVE /retrieve returned {resp.status_code}", "detail": resp.text}
-        )
+        return json.dumps({"error": f"EVE /retrieve returned {resp.status_code}", "detail": resp.text})
 
     return json.dumps(resp.json())
 

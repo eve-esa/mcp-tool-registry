@@ -60,14 +60,18 @@ load_dotenv(_ENV_PATH, override=False)
 # https://forest-fire.emergency.copernicus.eu/downloads-instructions
 EFFIS_OWS = "https://maps.effis.emergency.copernicus.eu/effis"
 
+
 # CDSE Sentinel Hub (Copernicus Data Space Ecosystem)
 # Register at https://dataspace.copernicus.eu/ then create OAuth credentials
 # at https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
 def _cdse_client_id() -> str:
     return os.getenv("CDSE_CLIENT_ID", "")
 
+
 def _cdse_client_secret() -> str:
     return os.getenv("CDSE_CLIENT_SECRET", "")
+
+
 CDSE_TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 CDSE_PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
 
@@ -193,8 +197,7 @@ def _read_burnt_areas_from_shapefile(
                 sb = shape.bbox  # (minx, miny, maxx, maxy) — but shapefile coords
                 # shapefile bbox: (min_lon, min_lat, max_lon, max_lat)
                 # Note: EFFIS shapefile is in EPSG:4326
-                if (sb[2] < bbox_filter[0] or sb[0] > bbox_filter[2] or
-                    sb[3] < bbox_filter[1] or sb[1] > bbox_filter[3]):
+                if sb[2] < bbox_filter[0] or sb[0] > bbox_filter[2] or sb[3] < bbox_filter[1] or sb[1] > bbox_filter[3]:
                     continue
             except Exception:
                 pass
@@ -216,11 +219,13 @@ def _read_burnt_areas_from_shapefile(
         except Exception:
             geom = None
 
-        features.append({
-            "type": "Feature",
-            "properties": props,
-            "geometry": geom,
-        })
+        features.append(
+            {
+                "type": "Feature",
+                "properties": props,
+                "geometry": geom,
+            }
+        )
 
         if len(features) >= max_features:
             break
@@ -248,10 +253,7 @@ def _gml_to_geojson(gml_text: str) -> dict:
 
     geojson_features = []
 
-    members = (
-        root.findall(".//gml:featureMember", ns)
-        or root.findall(".//{http://www.opengis.net/gml}featureMember")
-    )
+    members = root.findall(".//gml:featureMember", ns) or root.findall(".//{http://www.opengis.net/gml}featureMember")
 
     for member in members:
         feat_elem = member[0] if len(member) > 0 else member
@@ -268,11 +270,13 @@ def _gml_to_geojson(gml_text: str) -> dict:
             elif child.text and child.text.strip():
                 properties[tag] = child.text.strip()
 
-        geojson_features.append({
-            "type": "Feature",
-            "properties": properties,
-            "geometry": geometry,
-        })
+        geojson_features.append(
+            {
+                "type": "Feature",
+                "properties": properties,
+                "geometry": geometry,
+            }
+        )
 
     return {
         "type": "FeatureCollection",
@@ -424,10 +428,12 @@ async def geocode_place(
         return json.dumps({"error": f"Geocoding failed: {exc}"})
 
     if not results:
-        return json.dumps({
-            "error": f"No results found for '{place_name}'.",
-            "place_name": place_name,
-        })
+        return json.dumps(
+            {
+                "error": f"No results found for '{place_name}'.",
+                "place_name": place_name,
+            }
+        )
 
     buf = buffer_km / 111.0
 
@@ -444,8 +450,10 @@ async def geocode_place(
             "display_name": r.get("display_name", ""),
             "bbox": f"{west:.4f},{south:.4f},{east:.4f},{north:.4f}",
             "bbox_array": [
-                round(west, 4), round(south, 4),
-                round(east, 4), round(north, 4),
+                round(west, 4),
+                round(south, 4),
+                round(east, 4),
+                round(north, 4),
             ],
             "lat": float(r.get("lat", 0)),
             "lon": float(r.get("lon", 0)),
@@ -456,12 +464,14 @@ async def geocode_place(
 
     parsed = [_parse_result(r) for r in results]
 
-    return json.dumps({
-        "place_name": place_name,
-        "top_result": parsed[0],
-        "all_results": parsed,
-        "total_results": len(parsed),
-    })
+    return json.dumps(
+        {
+            "place_name": place_name,
+            "top_result": parsed[0],
+            "all_results": parsed,
+            "total_results": len(parsed),
+        }
+    )
 
 
 # ===== Tool 1: EFFIS Burnt Areas (Copernicus) ==============================
@@ -516,7 +526,6 @@ async def get_effis_burnt_areas(
         JSON with a list of fires (bbox, area_ha, commune, country,
         firedate), saved file paths, and WMS map image info.
     """
-    from datetime import timedelta
 
     # Resolve date shortcuts and build WFS params
     wfs_layer = "ms:modis.ba.poly"
@@ -556,7 +565,9 @@ async def get_effis_burnt_areas(
 
     logger.info(
         "EFFIS burnt areas: wfs_layer=%s bbox=%s date=%s",
-        wfs_layer, bbox, date_label,
+        wfs_layer,
+        bbox,
+        date_label,
     )
 
     result: dict[str, Any] = {
@@ -630,8 +641,7 @@ async def get_effis_burnt_areas(
                     "STARTINDEX": str(offset),
                     "SORTBY": "FIREDATE D",
                 }
-                logger.info("  Paginating: offset=%d batch=%d matched=%d",
-                            offset, batch_size, len(matched))
+                logger.info("  Paginating: offset=%d batch=%d matched=%d", offset, batch_size, len(matched))
 
                 resp = await _http_get(EFFIS_OWS, params=wfs_params)
                 batch = _gml_to_geojson(resp.text)
@@ -673,8 +683,13 @@ async def get_effis_burnt_areas(
                 "features": matched[:max_features],
             }
             n_batches = offset // batch_size + 1
-            logger.info("  Done: %d matches from %d scanned (%d batches of %d)",
-                        len(matched), total_scanned, n_batches, batch_size)
+            logger.info(
+                "  Done: %d matches from %d scanned (%d batches of %d)",
+                len(matched),
+                total_scanned,
+                n_batches,
+                batch_size,
+            )
             result["scan_info"] = {
                 "batches": n_batches,
                 "batch_size": batch_size,
@@ -729,8 +744,7 @@ async def get_effis_burnt_areas(
             stack = [geom.get("coordinates", [])]
             while stack:
                 item = stack.pop()
-                if (isinstance(item, (list, tuple)) and len(item) >= 2
-                        and isinstance(item[0], (int, float))):
+                if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[0], (int, float)):
                     all_lons.append(item[0])
                     all_lats.append(item[1])
                 elif isinstance(item, (list, tuple)):
@@ -744,15 +758,16 @@ async def get_effis_burnt_areas(
             east = max(all_lons) + buf
             north = max(all_lats) + buf
 
-            fires.append({
-                "bbox": f"{west:.4f},{south:.4f},{east:.4f},{north:.4f}",
-                "bbox_array": [round(west, 4), round(south, 4),
-                               round(east, 4), round(north, 4)],
-                "area_ha": area_ha,
-                "commune": props.get("COMMUNE", props.get("PROVINCE", "")),
-                "country": props.get("COUNTRY", ""),
-                "firedate": props.get("FIREDATE", ""),
-            })
+            fires.append(
+                {
+                    "bbox": f"{west:.4f},{south:.4f},{east:.4f},{north:.4f}",
+                    "bbox_array": [round(west, 4), round(south, 4), round(east, 4), round(north, 4)],
+                    "area_ha": area_ha,
+                    "commune": props.get("COMMUNE", props.get("PROVINCE", "")),
+                    "country": props.get("COUNTRY", ""),
+                    "firedate": props.get("FIREDATE", ""),
+                }
+            )
 
         fires.sort(key=lambda f: f["area_ha"], reverse=True)
         result["buffer_km"] = buffer_km
@@ -834,10 +849,6 @@ async def _cdse_catalog_search(
     return result
 
 
-
-
-
-
 # ===== Tool 2: Compute Vegetation & Burn Metrics ============================
 
 # Evalscripts for the Sentinel Hub Statistical API.
@@ -870,7 +881,6 @@ function evaluatePixel(sample) {
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-10);
   return { ndvi: [ndvi], dataMask: [sample.dataMask] };
 }""",
-
     "bais2": """//VERSION=3
 function setup() {
   return {
@@ -888,7 +898,6 @@ function evaluatePixel(sample) {
               ((sample.B12 - sample.B8A) / (Math.sqrt(swirSum) + 1e-10) + 1);
   return { bais2: [bais2], dataMask: [sample.dataMask] };
 }""",
-
     "nbr": """//VERSION=3
 function setup() {
   return {
@@ -903,7 +912,6 @@ function evaluatePixel(sample) {
   var nbr = (sample.B08 - sample.B12) / (sample.B08 + sample.B12 + 1e-10);
   return { nbr: [nbr], dataMask: [sample.dataMask] };
 }""",
-
     "ndvi_bais2": """//VERSION=3
 function setup() {
   return {
@@ -961,7 +969,6 @@ function evaluatePixel(sample) {
     [[0,0,0.5], [0,0.3,0.8], [0.95,0.95,0.1], [0.9,0.5,0.1],
      [0.8,0.2,0.1], [0.6,0,0], [0.8,0,0.8]]);
 }""",
-
     "nbr": """//VERSION=3
 function setup() {
   return {
@@ -1069,7 +1076,6 @@ function evaluatePixel(s) {
   var bais2 = (1 - Math.sqrt(r)) * ((s.B12 - s.B8A) / Math.sqrt(sw) + 1);
   return [Math.max(-10, Math.min(10, bais2))];
 }""",
-
     "nbr": """//VERSION=3
 function setup() {
   return {
@@ -1098,9 +1104,10 @@ def _generate_metric_plots(
     import math
 
     import matplotlib
+
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
 
     fire_dt = datetime.strptime(fire_date, "%Y-%m-%d")
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -1141,20 +1148,30 @@ def _generate_metric_plots(
             hi = [r[3] for r in rows]
 
             ax.plot(
-                dates, means, marker=marker, color=color,
-                label=phase_label, markersize=5, linewidth=1.5,
+                dates,
+                means,
+                marker=marker,
+                color=color,
+                label=phase_label,
+                markersize=5,
+                linewidth=1.5,
             )
             ax.fill_between(dates, lo, hi, color=color, alpha=0.15)
 
         ax.axvline(
-            fire_dt, color="#E65100", linestyle="--",
-            linewidth=2, label="Fire date", zorder=5,
+            fire_dt,
+            color="#E65100",
+            linestyle="--",
+            linewidth=2,
+            label="Fire date",
+            zorder=5,
         )
         ax.set_xlabel("Date", fontsize=11)
         ax.set_ylabel(metric_name.upper(), fontsize=11)
         ax.set_title(
             f"{metric_name.upper()} \u2014 Time Series Around Fire ({fire_date})",
-            fontsize=13, fontweight="bold",
+            fontsize=13,
+            fontweight="bold",
         )
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
@@ -1164,8 +1181,11 @@ def _generate_metric_plots(
 
         filepath = save_dir / f"{metric_name}_timeseries_{fire_date}.png"
         fig.savefig(
-            str(filepath), dpi=150, bbox_inches="tight",
-            facecolor="white", edgecolor="none",
+            str(filepath),
+            dpi=150,
+            bbox_inches="tight",
+            facecolor="white",
+            edgecolor="none",
         )
         plt.close(fig)
         plots[metric_name] = str(filepath)
@@ -1183,16 +1203,17 @@ _METRIC_VALID_RANGE: dict[str, tuple[float, float]] = {
 def _tiff_to_numpy(
     data: bytes,
     metric: str | None = None,
-) -> "np.ndarray":
+) -> np.ndarray:
     """Parse a single-band FLOAT32 TIFF response into a numpy array.
 
     Uses *tifffile* for reliable FLOAT32 parsing (Pillow silently
     corrupts float pixel values).  Replaces non-finite values and
     values outside the physically valid range for *metric* with NaN.
     """
+    import io
+
     import numpy as np
     import tifffile
-    import io
 
     arr = tifffile.imread(io.BytesIO(data)).astype(np.float32)
     arr[~np.isfinite(arr)] = np.nan
@@ -1211,7 +1232,7 @@ async def _download_composite(
     height: int,
     max_cloud_cover: float,
     metric: str,
-) -> "np.ndarray":
+) -> np.ndarray:
     """Download a per-pixel median composite via the Process API.
 
     Uses mosaicking: "ORBIT" so all cloud-free scenes in the time range
@@ -1230,13 +1251,15 @@ async def _download_composite(
                 "bbox": bbox,
                 "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
             },
-            "data": [{
-                "type": "sentinel-2-l2a",
-                "dataFilter": {
-                    "timeRange": {"from": time_from, "to": time_to},
-                    "maxCloudCoverage": max_cloud_cover,
-                },
-            }],
+            "data": [
+                {
+                    "type": "sentinel-2-l2a",
+                    "dataFilter": {
+                        "timeRange": {"from": time_from, "to": time_to},
+                        "maxCloudCoverage": max_cloud_cover,
+                    },
+                }
+            ],
         },
         "output": {
             "width": width,
@@ -1259,16 +1282,15 @@ async def _download_composite(
 
 
 def _compute_burn_mask(
-    pre_composite: "np.ndarray",
-    post_composite: "np.ndarray",
+    pre_composite: np.ndarray,
+    post_composite: np.ndarray,
     threshold: float,
-) -> "np.ndarray":
+) -> np.ndarray:
     """Burn mask from dNBR = pre_median - post_median > threshold."""
     import numpy as np
 
     valid = np.isfinite(pre_composite) & np.isfinite(post_composite)
-    dnbr = (pre_composite.astype(np.float64)
-            - post_composite.astype(np.float64))
+    dnbr = pre_composite.astype(np.float64) - post_composite.astype(np.float64)
     return valid & (dnbr > threshold)
 
 
@@ -1280,7 +1302,7 @@ async def _download_index_raster(
     width: int,
     height: int,
     max_cloud_cover: float,
-) -> "np.ndarray":
+) -> np.ndarray:
     """Download a single-scene index raster (NDVI or BAIS2) as a numpy array."""
     scene_from = f"{scene_date}T00:00:00Z"
     scene_to = f"{scene_date}T23:59:59Z"
@@ -1290,14 +1312,16 @@ async def _download_index_raster(
                 "bbox": bbox,
                 "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
             },
-            "data": [{
-                "type": "sentinel-2-l2a",
-                "dataFilter": {
-                    "timeRange": {"from": scene_from, "to": scene_to},
-                    "maxCloudCoverage": max_cloud_cover,
-                    "mosaickingOrder": "leastCC",
-                },
-            }],
+            "data": [
+                {
+                    "type": "sentinel-2-l2a",
+                    "dataFilter": {
+                        "timeRange": {"from": scene_from, "to": scene_to},
+                        "maxCloudCoverage": max_cloud_cover,
+                        "mosaickingOrder": "leastCC",
+                    },
+                }
+            ],
         },
         "output": {
             "width": width,
@@ -1345,11 +1369,12 @@ async def _download_multiband_composite(
     width: int,
     height: int,
     max_cloud_cover: float,
-) -> "np.ndarray":
+) -> np.ndarray:
     """Download a RED+NIR median composite as a (2, H, W) float32 array."""
+    import io
+
     import numpy as np
     import tifffile
-    import io
 
     req_body = {
         "input": {
@@ -1357,13 +1382,15 @@ async def _download_multiband_composite(
                 "bbox": bbox,
                 "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
             },
-            "data": [{
-                "type": "sentinel-2-l2a",
-                "dataFilter": {
-                    "timeRange": {"from": time_from, "to": time_to},
-                    "maxCloudCoverage": max_cloud_cover,
-                },
-            }],
+            "data": [
+                {
+                    "type": "sentinel-2-l2a",
+                    "dataFilter": {
+                        "timeRange": {"from": time_from, "to": time_to},
+                        "maxCloudCoverage": max_cloud_cover,
+                    },
+                }
+            ],
         },
         "output": {
             "width": width,
@@ -1374,7 +1401,8 @@ async def _download_multiband_composite(
     }
     async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
         resp = await client.post(
-            CDSE_PROCESS_URL, json=req_body,
+            CDSE_PROCESS_URL,
+            json=req_body,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         )
         resp.raise_for_status()
@@ -1388,9 +1416,9 @@ async def _download_multiband_composite(
 
 
 def _compute_severity_map(
-    pre_composite: "np.ndarray",
-    post_composite: "np.ndarray",
-) -> "np.ndarray":
+    pre_composite: np.ndarray,
+    post_composite: np.ndarray,
+) -> np.ndarray:
     """Classify dNBR into severity classes 1-4 per Key & Benson (2006).
 
     1=Low (0.1-0.27), 2=Moderate-low (0.27-0.44),
@@ -1414,13 +1442,13 @@ def _compute_severity_map(
 
 
 def build_recovery_table(
-    img_pre: "np.ndarray",
-    img_dist: "np.ndarray",
-    imgs_post: dict[str, "np.ndarray"],
-    burn_mask: "np.ndarray",
+    img_pre: np.ndarray,
+    img_dist: np.ndarray,
+    imgs_post: dict[str, np.ndarray],
+    burn_mask: np.ndarray,
     bands: dict[str, int],
-    severity_map: "np.ndarray",
-) -> "Any":
+    severity_map: np.ndarray,
+) -> Any:
     """Build a recovery table with VRR (%) and raw NDVI.
 
     VRR(%) = (NDVI_2 - NDVI_1) / (NDVI_0 - NDVI_1) x 100
@@ -1432,9 +1460,10 @@ def build_recovery_table(
         >100 % = Excellent  |  75-100 % = Very good  |  50-75 % = Good
         25-50 % = Average   |  0-25 % = Poor         |  <0 % = Very poor
     """
+    import re as _re
+
     import numpy as np
     import pandas as pd
-    import re as _re
 
     nir_i, red_i = bands["nir"], bands["red"]
 
@@ -1459,9 +1488,12 @@ def build_recovery_table(
             present_classes[cls] = cls_label
 
     _VRR_CLASSES = [
-        (-np.inf, 0.0, "Very poor"), (0.0, 25.0, "Poor"),
-        (25.0, 50.0, "Average"), (50.0, 75.0, "Good"),
-        (75.0, 100.0, "Very good"), (100.0, np.inf, "Excellent"),
+        (-np.inf, 0.0, "Very poor"),
+        (0.0, 25.0, "Poor"),
+        (25.0, 50.0, "Average"),
+        (50.0, 75.0, "Good"),
+        (75.0, 100.0, "Very good"),
+        (100.0, np.inf, "Excellent"),
     ]
 
     rows: list[dict] = []
@@ -1510,15 +1542,17 @@ def build_recovery_table(
 
 
 def _generate_recovery_plot(
-    recovery_df: "Any",
+    recovery_df: Any,
     fire_date: str,
     save_dir: Path,
 ) -> str | None:
     """Generate a two-panel recovery plot: raw NDVI and VRR (%)."""
     import matplotlib
+
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import re as _re
+
+    import matplotlib.pyplot as plt
 
     if recovery_df.empty:
         return None
@@ -1564,8 +1598,8 @@ def _generate_recovery_plot(
 
 
 def _masked_statistics(
-    arr: "np.ndarray",
-    mask: "np.ndarray",
+    arr: np.ndarray,
+    mask: np.ndarray,
     metric: str | None = None,
 ) -> dict:
     """Compute statistics over masked (fire-affected) pixels only.
@@ -1697,13 +1731,15 @@ async def compute_metrics(
     from datetime import timedelta
 
     if not _cdse_client_id() or not _cdse_client_secret():
-        return json.dumps({
-            "error": (
-                "CDSE credentials not set. Register at "
-                "https://dataspace.copernicus.eu/ then set "
-                "CDSE_CLIENT_ID and CDSE_CLIENT_SECRET env vars."
-            )
-        })
+        return json.dumps(
+            {
+                "error": (
+                    "CDSE credentials not set. Register at "
+                    "https://dataspace.copernicus.eu/ then set "
+                    "CDSE_CLIENT_ID and CDSE_CLIENT_SECRET env vars."
+                )
+            }
+        )
 
     # ── Validate inputs ──
     try:
@@ -1716,19 +1752,14 @@ async def compute_metrics(
     try:
         fire_dt = datetime.strptime(fire_date, "%Y-%m-%d")
     except ValueError:
-        return json.dumps({
-            "error": f"Invalid fire_date: {fire_date}. Expected YYYY-MM-DD."
-        })
+        return json.dumps({"error": f"Invalid fire_date: {fire_date}. Expected YYYY-MM-DD."})
 
     if metrics is None:
         metrics = ["ndvi", "nbr", "bais2", "regrowth"]
     valid_metrics = {"ndvi", "nbr", "bais2", "regrowth"}
     for m in metrics:
         if m not in valid_metrics:
-            return json.dumps({
-                "error": f"Unknown metric '{m}'. "
-                         f"Valid: {', '.join(sorted(valid_metrics))}"
-            })
+            return json.dumps({"error": f"Unknown metric '{m}'. Valid: {', '.join(sorted(valid_metrics))}"})
 
     do_regrowth = "regrowth" in metrics
     scene_metrics = [m for m in metrics if m != "regrowth"]
@@ -1756,7 +1787,11 @@ async def compute_metrics(
 
     logger.info(
         "compute_metrics: fire=%s bbox=%s metrics=%s  %d+%d months",
-        fire_date, bbox, metrics, months_before, months_after,
+        fire_date,
+        bbox,
+        metrics,
+        months_before,
+        months_after,
     )
 
     result: dict[str, Any] = {
@@ -1825,14 +1860,24 @@ async def compute_metrics(
     try:
         logger.info("  Downloading pre-fire median NBR composite …")
         pre_composite = await _download_composite(
-            token, [west, south, east, north],
-            pre_from, pre_to, width, height, max_cloud_cover,
+            token,
+            [west, south, east, north],
+            pre_from,
+            pre_to,
+            width,
+            height,
+            max_cloud_cover,
             metric="nbr",
         )
         logger.info("  Downloading post-fire median NBR composite …")
         post_composite = await _download_composite(
-            token, [west, south, east, north],
-            post_from, post_to, width, height, max_cloud_cover,
+            token,
+            [west, south, east, north],
+            post_from,
+            post_to,
+            width,
+            height,
+            max_cloud_cover,
             metric="nbr",
         )
 
@@ -1841,10 +1886,13 @@ async def compute_metrics(
             nan_pct = 100.0 * (1 - finite.size / max(comp.size, 1))
             if finite.size:
                 logger.info(
-                    "  %s composite: mean=%.3f  std=%.3f  "
-                    "min=%.3f  max=%.3f  NaN=%.1f%%",
-                    label, float(np.mean(finite)), float(np.std(finite)),
-                    float(np.min(finite)), float(np.max(finite)), nan_pct,
+                    "  %s composite: mean=%.3f  std=%.3f  min=%.3f  max=%.3f  NaN=%.1f%%",
+                    label,
+                    float(np.mean(finite)),
+                    float(np.std(finite)),
+                    float(np.min(finite)),
+                    float(np.max(finite)),
+                    nan_pct,
                 )
             else:
                 logger.warning("  %s composite: ALL NaN", label)
@@ -1868,16 +1916,18 @@ async def compute_metrics(
         n_total = int(burn_mask.size)
         logger.info(
             "  Burn mask: %d/%d pixels (%.1f%%)",
-            n_burned, n_total, 100.0 * n_burned / max(n_total, 1),
+            n_burned,
+            n_total,
+            100.0 * n_burned / max(n_total, 1),
         )
 
         mask_path = series_dir / "burn_mask.png"
         PILImage.fromarray(
-            (burn_mask.astype(np.uint8) * 255), mode="L",
+            (burn_mask.astype(np.uint8) * 255),
+            mode="L",
         ).save(str(mask_path))
 
-        dnbr = (pre_composite.astype(np.float64)
-                - post_composite.astype(np.float64))
+        dnbr = pre_composite.astype(np.float64) - post_composite.astype(np.float64)
         dnbr_clipped = np.clip(np.nan_to_num(dnbr, nan=0.0), -1, 1)
         dnbr_img = ((dnbr_clipped + 1) / 2 * 255).astype(np.uint8)
         dnbr_path = series_dir / "dnbr.png"
@@ -1895,8 +1945,7 @@ async def compute_metrics(
 
         if n_burned == 0:
             result["burn_mask"]["warning"] = (
-                "No burned pixels detected — statistics will be empty. "
-                "Try lowering burn_threshold."
+                "No burned pixels detected — statistics will be empty. Try lowering burn_threshold."
             )
 
     except Exception as exc:
@@ -1912,14 +1961,9 @@ async def compute_metrics(
             severity_map = _compute_severity_map(pre_composite, post_composite)
 
             today = datetime.utcnow()
-            valid_months = [
-                rm for rm in recovery_months
-                if _add_months(fire_dt, rm) <= today
-            ]
+            valid_months = [rm for rm in recovery_months if _add_months(fire_dt, rm) <= today]
             if not valid_months:
-                result["recovery"] = {
-                    "error": f"All recovery months {recovery_months} fall in the future"
-                }
+                result["recovery"] = {"error": f"All recovery months {recovery_months} fall in the future"}
             else:
                 if len(valid_months) < len(recovery_months):
                     skipped = sorted(set(recovery_months) - set(valid_months))
@@ -1929,12 +1973,22 @@ async def compute_metrics(
 
                 img_pre_mb, img_dist_mb = await _aio.gather(
                     _download_multiband_composite(
-                        token, [west, south, east, north],
-                        pre_from, pre_to, width, height, max_cloud_cover,
+                        token,
+                        [west, south, east, north],
+                        pre_from,
+                        pre_to,
+                        width,
+                        height,
+                        max_cloud_cover,
                     ),
                     _download_multiband_composite(
-                        token, [west, south, east, north],
-                        post_from, post_to, width, height, max_cloud_cover,
+                        token,
+                        [west, south, east, north],
+                        post_from,
+                        post_to,
+                        width,
+                        height,
+                        max_cloud_cover,
                     ),
                 )
                 nir_i = _RECOVERY_BANDS["nir"]
@@ -1958,8 +2012,13 @@ async def compute_metrics(
                         label = f"T+{rm}mo"
                         try:
                             comp = await _download_multiband_composite(
-                                token, [west, south, east, north],
-                                t_from, t_to, width, height, max_cloud_cover,
+                                token,
+                                [west, south, east, north],
+                                t_from,
+                                t_to,
+                                width,
+                                height,
+                                max_cloud_cover,
                             )
                             cov = float(np.sum(np.isfinite(comp[nir_i][burn_mask]))) / max(int(np.sum(burn_mask)), 1)
                             if cov >= min_mask_coverage:
@@ -1972,8 +2031,12 @@ async def compute_metrics(
 
                     if imgs_post_recovery:
                         recovery_df = build_recovery_table(
-                            img_pre_mb, img_dist_mb, imgs_post_recovery,
-                            burn_mask, _RECOVERY_BANDS, severity_map,
+                            img_pre_mb,
+                            img_dist_mb,
+                            imgs_post_recovery,
+                            burn_mask,
+                            _RECOVERY_BANDS,
+                            severity_map,
                         )
                         recovery_dir = series_dir / "recovery"
                         recovery_dir.mkdir(parents=True, exist_ok=True)
@@ -2036,8 +2099,13 @@ async def compute_metrics(
             for metric_name in scene_metrics:
                 try:
                     raster = await _download_index_raster(
-                        token, [west, south, east, north],
-                        scene_date, metric_name, width, height, max_cloud_cover,
+                        token,
+                        [west, south, east, north],
+                        scene_date,
+                        metric_name,
+                        width,
+                        height,
+                        max_cloud_cover,
                     )
                     obs[metric_name] = _masked_statistics(raster, burn_mask, metric=metric_name)
                 except Exception as exc:
@@ -2057,13 +2125,8 @@ async def compute_metrics(
     # ── Download visualization images (reuse catalog from stats phase) ──
     kept_dates: set[str] | None = None
     if min_mask_coverage > 0:
-        kept_dates = {
-            obs["date"]
-            for obs in result["pre_fire"] + result["post_fire"]
-            if "date" in obs
-        }
-        logger.info("  Dates passing %.0f%% mask-coverage filter: %d",
-                     min_mask_coverage * 100, len(kept_dates))
+        kept_dates = {obs["date"] for obs in result["pre_fire"] + result["post_fire"] if "date" in obs}
+        logger.info("  Dates passing %.0f%% mask-coverage filter: %d", min_mask_coverage * 100, len(kept_dates))
 
     for phase, _, _ in phases:
         scenes = phase_scenes.get(phase, [])
@@ -2088,14 +2151,16 @@ async def compute_metrics(
                         "crs": "http://www.opengis.net/def/crs/EPSG/0/4326",
                     },
                 },
-                "data": [{
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {"from": scene_from, "to": scene_to},
-                        "maxCloudCoverage": max_cloud_cover,
-                        "mosaickingOrder": "leastCC",
-                    },
-                }],
+                "data": [
+                    {
+                        "type": "sentinel-2-l2a",
+                        "dataFilter": {
+                            "timeRange": {"from": scene_from, "to": scene_to},
+                            "maxCloudCoverage": max_cloud_cover,
+                            "mosaickingOrder": "leastCC",
+                        },
+                    }
+                ],
             }
 
             if (datetime.utcnow() - token_acquired).total_seconds() > 240:
@@ -2107,7 +2172,8 @@ async def compute_metrics(
 
             try:
                 async with httpx.AsyncClient(
-                    timeout=TIMEOUT, follow_redirects=True,
+                    timeout=TIMEOUT,
+                    follow_redirects=True,
                 ) as client:
                     auth_hdr = {
                         "Authorization": f"Bearer {token}",
@@ -2128,23 +2194,28 @@ async def compute_metrics(
                             "output": {
                                 "width": width,
                                 "height": height,
-                                "responses": [{
-                                    "identifier": "default",
-                                    "format": {"type": "image/png"},
-                                }],
+                                "responses": [
+                                    {
+                                        "identifier": "default",
+                                        "format": {"type": "image/png"},
+                                    }
+                                ],
                             },
                             "evalscript": vis_eval,
                         }
 
                         resp = await client.post(
-                            CDSE_PROCESS_URL, json=req_body,
+                            CDSE_PROCESS_URL,
+                            json=req_body,
                             headers=auth_hdr,
                         )
 
                         if resp.status_code != 200:
                             logger.warning(
                                 "  Image %s %s: HTTP %d",
-                                metric_name, scene_date, resp.status_code,
+                                metric_name,
+                                scene_date,
+                                resp.status_code,
                             )
                             continue
 
@@ -2153,33 +2224,44 @@ async def compute_metrics(
                         filepath.write_bytes(resp.content)
                         img_key = f"{phase}_discarded" if is_discarded else phase
                         result["images"].setdefault(img_key, [])
-                        result["images"][img_key].append({
-                            "date": scene_date,
-                            "metric": metric_name,
-                            "cloud_cover_pct": cloud_cover,
-                            "path": str(filepath),
-                            "size_bytes": len(resp.content),
-                        })
+                        result["images"][img_key].append(
+                            {
+                                "date": scene_date,
+                                "metric": metric_name,
+                                "cloud_cover_pct": cloud_cover,
+                                "path": str(filepath),
+                                "size_bytes": len(resp.content),
+                            }
+                        )
 
                         tag = " [discarded]" if is_discarded else ""
                         logger.info(
                             "  Image: %s %s %s  cloud=%.1f%%  %dKB%s",
-                            phase, metric_name, scene_date, cloud_cover,
-                            len(resp.content) // 1024, tag,
+                            phase,
+                            metric_name,
+                            scene_date,
+                            cloud_cover,
+                            len(resp.content) // 1024,
+                            tag,
                         )
 
             except Exception as exc:
                 logger.warning(
                     "  Image download failed for %s %s: %s",
-                    phase, scene_date, exc,
+                    phase,
+                    scene_date,
+                    exc,
                 )
 
     # ── Generate time-series plots ──
     try:
         plot_dir = series_dir / "plots"
         plot_paths = _generate_metric_plots(
-            result["pre_fire"], result["post_fire"],
-            scene_metrics, fire_date, plot_dir,
+            result["pre_fire"],
+            result["post_fire"],
+            scene_metrics,
+            fire_date,
+            plot_dir,
         )
         result["plots"] = plot_paths
         logger.info("  Plots saved: %s", list(plot_paths.values()))
@@ -2206,35 +2288,25 @@ async def compute_metrics(
         return sum(vals) / len(vals) if vals else None
 
     summary: dict[str, Any] = {
-        "pre_fire_observations": len([
-            o for o in result["pre_fire"] if "error" not in o
-        ]),
-        "post_fire_observations": len([
-            o for o in result["post_fire"] if "error" not in o
-        ]),
+        "pre_fire_observations": len([o for o in result["pre_fire"] if "error" not in o]),
+        "post_fire_observations": len([o for o in result["post_fire"] if "error" not in o]),
     }
 
     for metric_name in scene_metrics:
         pre_mean = _phase_means(result["pre_fire"], metric_name)
         post_mean = _phase_means(result["post_fire"], metric_name)
-        summary[f"pre_fire_mean_{metric_name}"] = (
-            round(pre_mean, 4) if pre_mean is not None else None
-        )
-        summary[f"post_fire_mean_{metric_name}"] = (
-            round(post_mean, 4) if post_mean is not None else None
-        )
+        summary[f"pre_fire_mean_{metric_name}"] = round(pre_mean, 4) if pre_mean is not None else None
+        summary[f"post_fire_mean_{metric_name}"] = round(post_mean, 4) if post_mean is not None else None
         if pre_mean is not None and post_mean is not None:
             summary[f"{metric_name}_change"] = round(post_mean - pre_mean, 4)
         else:
             summary[f"{metric_name}_change"] = None
 
-    summary["images_downloaded"] = (
-        len(result["images"].get("pre_fire", []))
-        + len(result["images"].get("post_fire", []))
+    summary["images_downloaded"] = len(result["images"].get("pre_fire", [])) + len(
+        result["images"].get("post_fire", [])
     )
-    summary["images_discarded"] = (
-        len(result["images"].get("pre_fire_discarded", []))
-        + len(result["images"].get("post_fire_discarded", []))
+    summary["images_discarded"] = len(result["images"].get("pre_fire_discarded", [])) + len(
+        result["images"].get("post_fire_discarded", [])
     )
     if min_mask_coverage > 0:
         summary["mask_coverage_filter"] = {
@@ -2255,7 +2327,8 @@ async def compute_metrics(
     series_dir.mkdir(parents=True, exist_ok=True)
     filepath = series_dir / f"metrics_{fire_date}.json"
     filepath.write_text(
-        json.dumps(result, indent=2, default=str), encoding="utf-8",
+        json.dumps(result, indent=2, default=str),
+        encoding="utf-8",
     )
 
     # Return only the summary to the model to avoid flooding the context
