@@ -90,6 +90,20 @@ def find_runtime_by_name(client, name: str) -> dict | None:
             return None
 
 
+def _build_authorizer_config(
+    cognito_discovery_url: str | None,
+    cognito_client_id: str | None,
+) -> dict | None:
+    if cognito_discovery_url and cognito_client_id:
+        return {
+            "customJWTAuthorizer": {
+                "discoveryUrl": cognito_discovery_url,
+                "allowedClients": [cognito_client_id],
+            }
+        }
+    return None
+
+
 def deploy_to_agentcore(
     server_name: str,
     image_uri: str,
@@ -101,20 +115,26 @@ def deploy_to_agentcore(
     client = boto3.client("bedrock-agentcore-control", region_name=region)
 
     existing = find_runtime_by_name(client, server_name)
+    auth_config = _build_authorizer_config(cognito_discovery_url, cognito_client_id)
 
     if existing:
         runtime_id = existing["agentRuntimeId"]
         runtime_arn = existing["agentRuntimeArn"]
         print(f"  Updating existing runtime: {runtime_arn}")
 
-        client.update_agent_runtime(
-            agentRuntimeId=runtime_id,
-            agentRuntimeArtifact={
+        update_kwargs = {
+            "agentRuntimeId": runtime_id,
+            "agentRuntimeArtifact": {
                 "containerConfiguration": {"containerUri": image_uri}
             },
-            roleArn=execution_role_arn,
-            networkConfiguration={"networkMode": "PUBLIC"},
-        )
+            "roleArn": execution_role_arn,
+            "networkConfiguration": {"networkMode": "PUBLIC"},
+        }
+
+        if auth_config:
+            update_kwargs["authorizerConfiguration"] = auth_config
+
+        client.update_agent_runtime(**update_kwargs)
         print(f"  Updated:  {runtime_arn}")
         return runtime_arn
 
@@ -131,13 +151,8 @@ def deploy_to_agentcore(
             "networkConfiguration": {"networkMode": "PUBLIC"},
         }
 
-        if cognito_discovery_url and cognito_client_id:
-            create_kwargs["authorizerConfiguration"] = {
-                "customJWTAuthorizer": {
-                    "discoveryUrl": cognito_discovery_url,
-                    "allowedClients": [cognito_client_id],
-                }
-            }
+        if auth_config:
+            create_kwargs["authorizerConfiguration"] = auth_config
 
         response = client.create_agent_runtime(**create_kwargs)
         runtime_arn = response["agentRuntimeArn"]
