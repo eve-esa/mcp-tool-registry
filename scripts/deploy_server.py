@@ -11,7 +11,7 @@ Usage:
         --account-id 123456789012 \
         --execution-role-arn arn:aws:iam::123456789012:role/... \
         [--cognito-discovery-url https://...] \
-        [--cognito-client-id abc123]
+        [--cognito-client-id abc123,def456]
 """
 
 import argparse
@@ -95,10 +95,11 @@ def _build_authorizer_config(
     cognito_client_id: str | None,
 ) -> dict | None:
     if cognito_discovery_url and cognito_client_id:
+        allowed = [c.strip() for c in cognito_client_id.split(",") if c.strip()]
         return {
             "customJWTAuthorizer": {
                 "discoveryUrl": cognito_discovery_url,
-                "allowedClients": [cognito_client_id],
+                "allowedClients": allowed,
             }
         }
     return None
