@@ -9,8 +9,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  # ─── Detect scope and run structural validation ───────────────────────
-  validate:
+  # ─── Detect which servers changed (always succeeds) ──────────────────
+  detect:
     runs-on: ubuntu-latest
     outputs:
       servers: ${{ steps.detect.outputs.servers }}
@@ -20,10 +20,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
 
       - name: Detect changed files
         id: detect
@@ -54,19 +50,34 @@ jobs:
             echo "has_infra=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # ─── Structural validation (runs independently) ─────────────────────
+  validate:
+    needs: detect
+    if: needs.detect.outputs.has_server == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Run structural validation
         run: |
           BASE_REF="origin/${{ github.base_ref }}"
+          git fetch origin "${{ github.base_ref }}" --depth=1
           python scripts/validate_pr.py --base-ref "$BASE_REF"
 
-  # ─── Lint with ruff ───────────────────────────────────────────────────
+  # ─── Lint with ruff (runs independently) ─────────────────────────────
   lint:
-    needs: validate
-    if: needs.validate.outputs.has_server == 'true'
+    needs: detect
+    if: needs.detect.outputs.has_server == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        server: ${{ fromJson(needs.validate.outputs.servers) }}
+        server: ${{ fromJson(needs.detect.outputs.servers) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,14 +91,14 @@ jobs:
       - name: Lint server (${{ matrix.server }})
         run: ruff check servers/${{ matrix.server }}/
 
-  # ─── Docker build smoke test ──────────────────────────────────────────
+  # ─── Docker build smoke test (runs independently) ────────────────────
   docker-build:
-    needs: validate
-    if: needs.validate.outputs.has_server == 'true'
+    needs: detect
+    if: needs.detect.outputs.has_server == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        server: ${{ fromJson(needs.validate.outputs.servers) }}
+        server: ${{ fromJson(needs.detect.outputs.servers) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -103,8 +114,8 @@ jobs:
 
   # ─── Flag infrastructure changes for maintainer review ────────────────
   infra-review:
-    needs: validate
-    if: needs.validate.outputs.has_infra == 'true'
+    needs: detect
+    if: needs.detect.outputs.has_infra == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Add infra-review label
