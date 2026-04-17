@@ -3,6 +3,8 @@ Fire Detection MCP Server
 ==========================
 An MCP server providing European wildfire detection tools via:
 
+TEST_BAD_PR — this line will be removed after the test.
+
 1. EFFIS (Copernicus Emergency Management Service) — burnt area polygons
    via OGC WFS/WMS + local shapefile cache.
 2. CDSE Sentinel Hub — Sentinel-2 vegetation and burn index statistics
