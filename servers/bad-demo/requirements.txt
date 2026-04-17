@@ -1,0 +1,4 @@
+# RULE VIOLATION 7: missing version constraints
+mcp
+httpx
+requests
