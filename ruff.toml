@@ -1,0 +1,22 @@
+target-version = "py313"
+line-length = 120
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+]
+ignore = [
+    "E501",   # line length — handled by formatter, not linter
+    "B008",   # function call in default argument — common in FastMCP tool signatures
+    "SIM108", # ternary operator — readability preference
+    "SIM117", # nested with — async context managers with MCP SDK often require nesting
+]
+
+[lint.isort]
+known-first-party = ["server"]

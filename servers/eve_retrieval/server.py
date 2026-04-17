@@ -22,6 +22,11 @@ Environment (``eve_retrieval/.env`` — loaded automatically):
     EVE_EMAIL            — account email
     EVE_PASSWORD         — account password
     EVE_API_BASE_URL     — API root (default: https://staging-api.eve-chat.chat)
+
+Per-request credential headers (override env vars when present):
+    X-EVE-Token          — pre-obtained EVE Bearer token (skips login)
+    X-EVE-Email          — EVE account email  (used with X-EVE-Password)
+    X-EVE-Password       — EVE account password
 """
 
 from __future__ import annotations
@@ -43,13 +48,44 @@ load_dotenv(_ENV_PATH, override=False)
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
 
-EVE_EMAIL = os.environ["EVE_EMAIL"]
-EVE_PASSWORD = os.environ["EVE_PASSWORD"]
+EVE_EMAIL = os.getenv("EVE_EMAIL", "")
+EVE_PASSWORD = os.getenv("EVE_PASSWORD", "")
 EVE_API_BASE_URL = os.getenv("EVE_API_BASE_URL", "https://staging-api.eve-chat.chat")
 
 _HTTP_TIMEOUT = 120.0
 
 mcp = FastMCP("EVE Retrieval Server", host="0.0.0.0", port=8000, stateless_http=True)
+
+# ---------------------------------------------------------------------------
+# Per-request credential resolution (header → env fallback)
+# ---------------------------------------------------------------------------
+
+
+def _get_request_headers() -> dict[str, str]:
+    """Return HTTP headers from the current MCP request, or {} on stdio."""
+    try:
+        ctx = mcp.get_context()
+        request = ctx.request_context.request
+        if request is not None and hasattr(request, "headers"):
+            return dict(request.headers)
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_eve_creds() -> tuple[str, str]:
+    """Resolve EVE email/password: prefer per-request headers, fall back to env."""
+    headers = _get_request_headers()
+    email = headers.get("x-eve-email", "") or EVE_EMAIL
+    password = headers.get("x-eve-password", "") or EVE_PASSWORD
+    return email, password
+
+
+def _resolve_eve_token() -> str | None:
+    """Return a pre-obtained EVE token from the X-EVE-Token header, or None."""
+    headers = _get_request_headers()
+    return headers.get("x-eve-token") or None
+
 
 # ---------------------------------------------------------------------------
 # Token management
@@ -59,14 +95,14 @@ _access_token: str | None = None
 _refresh_token: str | None = None
 
 
-async def _login() -> str:
+async def _login(email: str, password: str) -> str:
     """Authenticate against ``POST /login`` and cache tokens."""
     global _access_token, _refresh_token
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         resp = await client.post(
             f"{EVE_API_BASE_URL}/login",
-            json={"email": EVE_EMAIL, "password": EVE_PASSWORD},
+            json={"email": email, "password": password},
         )
         resp.raise_for_status()
 
@@ -77,16 +113,22 @@ async def _login() -> str:
     return _access_token
 
 
-async def _get_token() -> str:
+async def _get_token(email: str, password: str) -> str:
     """Return a cached access token, logging in if necessary."""
     if _access_token is None:
-        return await _login()
+        return await _login(email, password)
     return _access_token
 
 
-async def _authed_post(path: str, body: dict[str, Any]) -> httpx.Response:
+async def _authed_post(
+    path: str,
+    body: dict[str, Any],
+    email: str,
+    password: str,
+) -> httpx.Response:
     """POST with Bearer auth; re-authenticate once on 401."""
-    token = await _get_token()
+    pre_token = _resolve_eve_token()
+    token = pre_token or await _get_token(email, password)
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         resp = await client.post(
@@ -95,9 +137,9 @@ async def _authed_post(path: str, body: dict[str, Any]) -> httpx.Response:
             headers={"Authorization": f"Bearer {token}"},
         )
 
-    if resp.status_code == 401:
+    if resp.status_code == 401 and not pre_token:
         log.info("Token expired — re-authenticating")
-        token = await _login()
+        token = await _login(email, password)
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.post(
                 f"{EVE_API_BASE_URL}{path}",
@@ -152,6 +194,20 @@ async def retrieve(
         JSON string containing retrieved_docs, latencies, original_query,
         and requery (the rewritten query used for retrieval).
     """
+    email, password = _resolve_eve_creds()
+    pre_token = _resolve_eve_token()
+
+    if not pre_token and (not email or not password):
+        return json.dumps(
+            {
+                "error": (
+                    "EVE credentials not set. Either send them as HTTP "
+                    "headers (X-EVE-Token, or X-EVE-Email / X-EVE-Password) "
+                    "or set EVE_EMAIL / EVE_PASSWORD env vars on the server."
+                )
+            }
+        )
+
     if public_collections is None:
         public_collections = ["Wiley AI Gateway", "Wikipedia EO", "qwen-512-filtered"]
 
@@ -171,12 +227,10 @@ async def retrieve(
     if llm_type is not None:
         body["llm_type"] = llm_type
 
-    resp = await _authed_post("/retrieve", body)
+    resp = await _authed_post("/retrieve", body, email, password)
 
     if resp.status_code != 200:
-        return json.dumps(
-            {"error": f"EVE /retrieve returned {resp.status_code}", "detail": resp.text}
-        )
+        return json.dumps({"error": f"EVE /retrieve returned {resp.status_code}", "detail": resp.text})
 
     return json.dumps(resp.json())
 
@@ -197,6 +251,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--port", type=int, default=8000, help="Port for HTTP transport")
     args = parser.parse_args()
+
+    mcp.settings.port = args.port
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")

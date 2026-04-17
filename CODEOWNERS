@@ -1,0 +1,8 @@
+# Shared infrastructure — requires maintainer approval.
+# GitHub will automatically request review from these owners
+# when a PR touches the matched paths.
+#
+/shared/          @JINO-ROHIT @Lopez-Antonio
+/scripts/         @JINO-ROHIT @Lopez-Antonio
+/.github/         @JINO-ROHIT @Lopez-Antonio
+/CODEOWNERS       @JINO-ROHIT @Lopez-Antonio
