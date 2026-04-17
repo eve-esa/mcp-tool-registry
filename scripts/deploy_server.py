@@ -129,6 +129,7 @@ def deploy_to_agentcore(
                 "containerConfiguration": {"containerUri": image_uri}
             },
             "roleArn": execution_role_arn,
+            "protocolConfiguration": {"serverProtocol": "MCP"},
             "networkConfiguration": {"networkMode": "PUBLIC"},
         }
 
