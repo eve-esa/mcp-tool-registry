@@ -277,6 +277,130 @@ To request new secrets, open an issue or contact a maintainer with:
 - Where to obtain the value
 - Which server needs it
 
+### Per-Request Credential Headers (Proxy Mode)
+
+MCP clients can supply their own upstream API credentials via custom HTTP headers so the server acts as a proxy using the caller's own accounts. When these headers are absent (e.g. stdio transport, or headers not sent), the server falls back to server-level env vars.
+
+This pattern allows multiple users to share a single deployed server while each using their own API credentials.
+
+**Resolution order:** per-request headers → server env vars.
+
+#### Supported headers by server
+
+| Server | Header | Purpose |
+|--------|--------|---------|
+| `effis` | `X-CDSE-Client-Id` | Copernicus Data Space OAuth client ID |
+| `effis` | `X-CDSE-Client-Secret` | Copernicus Data Space OAuth client secret |
+| `eve_retrieval` | `X-EVE-Token` | Pre-obtained EVE Bearer token (skips login) |
+| `eve_retrieval` | `X-EVE-Email` | EVE account email (used with `X-EVE-Password`) |
+| `eve_retrieval` | `X-EVE-Password` | EVE account password |
+
+#### Example: calling EFFIS with your own CDSE credentials
+
+```bash
+curl -X POST https://<agentcore-url>/mcp \
+  -H "Authorization: Bearer <cognito-token>" \
+  -H "X-CDSE-Client-Id: my-cdse-client-id" \
+  -H "X-CDSE-Client-Secret: my-cdse-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"compute_metrics","arguments":{...}},"id":1}'
+```
+
+Or from a Python MCP client:
+
+```python
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+headers = {
+    "Authorization": f"Bearer {cognito_token}",
+    "X-CDSE-Client-Id": "my-cdse-client-id",
+    "X-CDSE-Client-Secret": "my-cdse-secret",
+}
+async with streamablehttp_client(mcp_url, headers, timeout=180) as (read, write, _):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        result = await session.call_tool("compute_metrics", {...})
+```
+
+#### Example: LangGraph agent with credential headers
+
+Using [`langchain-mcp-adapters`](https://github.com/langchain-ai/langchain-mcp-adapters), pass credential headers in the `MultiServerMCPClient` config. The headers are sent on every HTTP request to the MCP server, so tools automatically receive the caller's credentials.
+
+```python
+import asyncio
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
+
+AGENTCORE_MCP_URL = "https://bedrock-agentcore.eu-west-1.amazonaws.com/runtimes/..."
+
+async def main():
+    async with MultiServerMCPClient(
+        {
+            "effis": {
+                "transport": "streamable_http",
+                "url": AGENTCORE_MCP_URL,
+                "headers": {
+                    "Authorization": f"Bearer {cognito_token}",
+                    "X-CDSE-Client-Id": "my-cdse-client-id",
+                    "X-CDSE-Client-Secret": "my-cdse-secret",
+                },
+            },
+        }
+    ) as client:
+        tools = client.get_tools()
+        agent = create_react_agent(
+            model=ChatOpenAI(model="gpt-4o"),
+            tools=tools,
+        )
+        result = await agent.ainvoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Compute NDVI and NBR metrics for the August 2025 "
+                            "fire near Athens (bbox 23.5,37.9,24.0,38.3)."
+                        ),
+                    }
+                ]
+            }
+        )
+        print(result["messages"][-1].content)
+
+asyncio.run(main())
+```
+
+> **Tip:** `headers` in the `MultiServerMCPClient` config are static — set once when the client is created. For multi-tenant applications where different users have different credentials, create a new `MultiServerMCPClient` per user/request with their specific headers.
+
+#### Implementing credential headers in new servers
+
+Use this pattern to resolve credentials with header fallback:
+
+```python
+def _get_request_headers() -> dict[str, str]:
+    """Return HTTP headers from the current MCP request, or {} on stdio."""
+    try:
+        ctx = mcp.get_context()
+        request = ctx.request_context.request
+        if request is not None and hasattr(request, "headers"):
+            return dict(request.headers)
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_my_creds() -> tuple[str, str]:
+    """Resolve credentials: prefer per-request headers, fall back to env."""
+    headers = _get_request_headers()
+    key = headers.get("x-my-api-key", "") or os.getenv("MY_API_KEY", "")
+    secret = headers.get("x-my-api-secret", "") or os.getenv("MY_API_SECRET", "")
+    return key, secret
+```
+
+**Important:** resolve credentials once at the start of the tool handler and pass them through to internal functions. The MCP request context may not be available during later async operations (e.g. token refresh callbacks).
+
 ---
 
 ## CI Rules and PR Checklist

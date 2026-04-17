@@ -12,9 +12,10 @@ select = [
     "SIM",   # flake8-simplify
 ]
 ignore = [
-    "E501",  # line length — handled by formatter, not linter
-    "B008",  # function call in default argument — common in FastMCP tool signatures
+    "E501",   # line length — handled by formatter, not linter
+    "B008",   # function call in default argument — common in FastMCP tool signatures
     "SIM108", # ternary operator — readability preference
+    "SIM117", # nested with — async context managers with MCP SDK often require nesting
 ]
 
 [lint.isort]

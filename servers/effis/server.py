@@ -105,6 +105,39 @@ logger = logging.getLogger("fire-mcp")
 mcp = FastMCP("Fire Detection Server", host="0.0.0.0", port=8000, stateless_http=True)
 
 
+# ---------------------------------------------------------------------------
+# Per-request credential resolution (header → env fallback)
+# ---------------------------------------------------------------------------
+# MCP clients can supply upstream API credentials via custom HTTP headers so
+# the server acts as a proxy using the caller's own accounts.  When headers
+# are absent (e.g. stdio transport or header not sent) the server falls back
+# to the process-level env vars (CDSE_CLIENT_ID / CDSE_CLIENT_SECRET).
+#
+# Supported headers:
+#   X-CDSE-Client-Id      — Copernicus Data Space client ID
+#   X-CDSE-Client-Secret  — Copernicus Data Space client secret
+
+
+def _get_request_headers() -> dict[str, str]:
+    """Return HTTP headers from the current MCP request, or {} on stdio."""
+    try:
+        ctx = mcp.get_context()
+        request = ctx.request_context.request
+        if request is not None and hasattr(request, "headers"):
+            return dict(request.headers)
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_cdse_creds() -> tuple[str, str]:
+    """Resolve CDSE credentials: prefer per-request headers, fall back to env."""
+    headers = _get_request_headers()
+    cid = headers.get("x-cdse-client-id", "") or _cdse_client_id()
+    csec = headers.get("x-cdse-client-secret", "") or _cdse_client_secret()
+    return cid, csec
+
+
 # ===== Helper utilities =====================================================
 
 
@@ -782,15 +815,25 @@ async def get_effis_burnt_areas(
 # ===== CDSE Authentication & Helpers ========================================
 
 
-async def _cdse_get_token() -> str:
-    """Get an OAuth2 access token from CDSE."""
+async def _cdse_get_token(
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> str:
+    """Get an OAuth2 access token from CDSE.
+
+    When *client_id* / *client_secret* are supplied they are used directly;
+    otherwise credentials are resolved via ``_resolve_cdse_creds()`` (HTTP
+    request headers first, then env vars).
+    """
+    cid = client_id or _resolve_cdse_creds()[0]
+    csec = client_secret or _resolve_cdse_creds()[1]
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             CDSE_TOKEN_URL,
             data={
                 "grant_type": "client_credentials",
-                "client_id": _cdse_client_id(),
-                "client_secret": _cdse_client_secret(),
+                "client_id": cid,
+                "client_secret": csec,
             },
         )
         resp.raise_for_status()
@@ -1730,13 +1773,15 @@ async def compute_metrics(
     """
     from datetime import timedelta
 
-    if not _cdse_client_id() or not _cdse_client_secret():
+    cdse_cid, cdse_csec = _resolve_cdse_creds()
+    if not cdse_cid or not cdse_csec:
         return json.dumps(
             {
                 "error": (
-                    "CDSE credentials not set. Register at "
-                    "https://dataspace.copernicus.eu/ then set "
-                    "CDSE_CLIENT_ID and CDSE_CLIENT_SECRET env vars."
+                    "CDSE credentials not set. Either send them as HTTP "
+                    "headers (X-CDSE-Client-Id / X-CDSE-Client-Secret) or "
+                    "register at https://dataspace.copernicus.eu/ and set "
+                    "CDSE_CLIENT_ID / CDSE_CLIENT_SECRET env vars on the server."
                 )
             }
         )
@@ -1777,9 +1822,9 @@ async def compute_metrics(
         ("post_fire", post_start, post_end),
     ]
 
-    # ── Authenticate ──
+    # ── Authenticate (using credentials resolved at call entry) ──
     try:
-        token = await _cdse_get_token()
+        token = await _cdse_get_token(cdse_cid, cdse_csec)
     except Exception as exc:
         return json.dumps({"error": f"CDSE authentication failed: {exc}"})
 
@@ -1830,7 +1875,7 @@ async def compute_metrics(
 
         if (datetime.utcnow() - token_acquired).total_seconds() > 240:
             try:
-                token = await _cdse_get_token()
+                token = await _cdse_get_token(cdse_cid, cdse_csec)
                 token_acquired = datetime.utcnow()
             except Exception as exc:
                 logger.warning("Token refresh failed: %s", exc)
@@ -2090,7 +2135,7 @@ async def compute_metrics(
 
             if (datetime.utcnow() - token_acquired).total_seconds() > 240:
                 try:
-                    token = await _cdse_get_token()
+                    token = await _cdse_get_token(cdse_cid, cdse_csec)
                     token_acquired = datetime.utcnow()
                 except Exception as exc:
                     logger.warning("Token refresh failed: %s", exc)
@@ -2165,7 +2210,7 @@ async def compute_metrics(
 
             if (datetime.utcnow() - token_acquired).total_seconds() > 240:
                 try:
-                    token = await _cdse_get_token()
+                    token = await _cdse_get_token(cdse_cid, cdse_csec)
                     token_acquired = datetime.utcnow()
                 except Exception as exc:
                     logger.warning("Token refresh failed: %s", exc)
@@ -2367,6 +2412,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--port", type=int, default=8000, help="Port for HTTP transport")
     args = parser.parse_args()
+
+    mcp.settings.port = args.port
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")

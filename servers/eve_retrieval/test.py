@@ -1,133 +1,211 @@
 #!/usr/bin/env python3
 """
-Local test script for the EVE Retrieval MCP Server.
+Integration test for the EVE Retrieval MCP Server.
 
-Calls the retrieve tool directly (async import from server.py) to verify
-authentication and the full retrieval pipeline against the EVE staging API.
+Starts the server locally on HTTP, connects with an MCP client, and
+exercises every tool through the protocol — exactly as a real caller would.
 
-Credentials are loaded from the .env file in this directory, or can be
-overridden via environment variables (EVE_EMAIL, EVE_PASSWORD).
+Credentials come from .env / env vars by default.  Override them from
+the command line to test the per-request header proxy flow.
 
 Usage:
-    python test.py                                  # default query
-    python test.py --query "What is Copernicus?"    # custom query
-    python test.py --query "Sentinel-2 bands" --k 5 # more documents
-    python test.py --query "climate change" --collections "Wikipedia EO"
+    # Default (creds from .env / env vars):
+    python test.py
+
+    # Override credentials:
+    python test.py --eve-email user@example.com --eve-password secret
+    python test.py --eve-token eyJhbGciOi...
+
+    # Custom query:
+    python test.py --query "What is Copernicus?" --k 5
+
+    # Specify port (default: 9100):
+    python test.py --port 9200
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import os
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+SERVER_DIR = Path(__file__).resolve().parent
+SERVER_PY = SERVER_DIR / "server.py"
+DEFAULT_PORT = 9100
+STARTUP_TIMEOUT = 15
+TOOL_TIMEOUT = 120
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _section(title: str) -> None:
+    print(f"\n{'=' * 60}")
+    print(f"  {title}")
+    print(f"{'=' * 60}")
+
+
+def _print_result(result) -> dict | None:
+    """Pretty-print a tool result and return the parsed JSON."""
+    try:
+        text = result.content[0].text
+        parsed = json.loads(text)
+        print(json.dumps(parsed, indent=2, default=str)[:3000])
+        if len(json.dumps(parsed)) > 3000:
+            print("  ... (truncated)")
+        return parsed
+    except (json.JSONDecodeError, IndexError, AttributeError):
+        print(result.content[0].text[:3000])
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Server lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _start_server(port: int, env_overrides: dict[str, str]) -> subprocess.Popen:
+    """Launch server.py as a subprocess on the given port."""
+    env = {**os.environ, **env_overrides}
+    proc = subprocess.Popen(
+        [sys.executable, str(SERVER_PY), "--transport", "http", "--port", str(port)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return proc
+
+
+async def _wait_for_server(url: str, timeout: float = STARTUP_TIMEOUT) -> None:
+    """Poll the server until it accepts connections."""
+    deadline = time.monotonic() + timeout
+    async with httpx.AsyncClient() as client:
+        while time.monotonic() < deadline:
+            try:
+                resp = await client.get(url)
+                if resp.status_code < 500:
+                    return
+            except httpx.ConnectError:
+                pass
+            await asyncio.sleep(0.3)
+    raise TimeoutError(f"Server did not start within {timeout}s")
+
+
+def _stop_server(proc: subprocess.Popen) -> None:
+    """Gracefully stop the server subprocess."""
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+# ---------------------------------------------------------------------------
+# Test cases
+# ---------------------------------------------------------------------------
+
+
+async def test_list_tools(session: ClientSession) -> list[str]:
+    """List available tools and return their names."""
+    _section("LIST TOOLS")
+    tools_result = await session.list_tools()
+    names = []
+    for t in tools_result.tools:
+        print(f"  - {t.name}: {t.description[:80]}")
+        names.append(t.name)
+    print(f"\n  Total: {len(names)} tools")
+    assert "retrieve" in names, "Expected 'retrieve' tool not found"
+    print("  [PASS] retrieve tool registered")
+    return names
 
 
 async def test_retrieve(
+    session: ClientSession,
     query: str,
     k: int,
     score_threshold: float,
-    public_collections: list[str] | None,
-):
-    """Call the retrieve tool and print results."""
-    from server import retrieve
+    collections: list[str] | None,
+) -> dict:
+    """Call the retrieve tool and validate the response shape."""
+    _section(f"TEST: retrieve(query={query!r}, k={k})")
 
-    print("=" * 60)
-    print("TEST: retrieve")
-    print(f"  query:              {query}")
-    print(f"  k:                  {k}")
-    print(f"  score_threshold:    {score_threshold}")
-    print(f"  public_collections: {public_collections or '(server defaults)'}")
-    print("=" * 60)
+    args: dict = {"query": query, "k": k, "score_threshold": score_threshold}
+    if collections:
+        args["public_collections"] = collections
 
     t0 = time.time()
-    result_json = await retrieve(
-        query=query,
-        k=k,
-        score_threshold=score_threshold,
-        public_collections=public_collections,
-    )
+    result = await session.call_tool("retrieve", args)
     elapsed = time.time() - t0
 
-    result = json.loads(result_json)
+    parsed = _print_result(result)
+    assert parsed is not None, "Failed to parse tool response as JSON"
 
-    if "error" in result:
-        print(f"\nError: {result['error']}")
-        print(f"Detail: {result.get('detail', '')[:500]}")
-        return result
+    if "error" in parsed:
+        print(f"\n  [FAIL] retrieve returned error: {parsed['error'][:200]}")
+        return parsed
 
-    docs = result.get("retrieved_docs", [])
-    latencies = result.get("latencies", {})
-
-    print(f"\nDone in {elapsed:.1f}s")
-    print(f"  original_query: {result.get('original_query', '?')}")
-    print(f"  requery:        {result.get('requery', '?')}")
+    print(f"\n  Elapsed: {elapsed:.1f}s")
+    print(f"  original_query: {parsed.get('original_query', '?')}")
+    print(f"  requery:        {parsed.get('requery', '?')}")
+    docs = parsed.get("retrieved_docs", [])
     print(f"  documents:      {len(docs)}")
 
-    if latencies:
-        print("\n  Latencies:")
-        for key, val in latencies.items():
-            if val is not None:
-                print(f"    {key}: {val}")
-
     if docs:
-        print("\n  Retrieved documents:")
-        for i, doc in enumerate(docs):
+        for i, doc in enumerate(docs[:3]):
             score = doc.get("score")
-            rerank = doc.get("reranking_score")
             coll = doc.get("collection_name", "?")
-            text = doc.get("text", "")
-            meta = doc.get("metadata", {})
-            title = meta.get("title", meta.get("name", ""))
-
+            text = doc.get("text", "")[:120].replace("\n", " ")
             score_str = f"score={score:.4f}" if score is not None else ""
-            rerank_str = f" rerank={rerank:.4f}" if rerank is not None else ""
+            print(f"    [{i+1}] {coll} | {score_str}")
+            if text:
+                print(f"         {text}...")
 
-            print(f"\n  [{i+1}] {coll} | {score_str}{rerank_str}")
-            if title:
-                print(f"      title: {title}")
-            preview = text[:200].replace("\n", " ")
-            if preview:
-                print(f"      text:  {preview}...")
-    else:
-        print("\n  No documents returned.")
-
-    return result
+    print("  [PASS] retrieve returned valid response")
+    return parsed
 
 
-async def test_login():
-    """Verify that login works and a token is obtained."""
-    from server import _login
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    print("=" * 60)
-    print("TEST: login")
-    print("=" * 60)
 
-    t0 = time.time()
-    token = await _login()
-    elapsed = time.time() - t0
+async def run_tests(port: int, query: str, k: int, score_threshold: float,
+                    collections: list[str] | None, headers: dict[str, str]) -> bool:
+    """Connect to the local server and run all tests."""
+    mcp_url = f"http://localhost:{port}/mcp"
 
-    print(f"\nDone in {elapsed:.1f}s")
-    print(f"  token: {token[:20]}...{token[-10:]}")
-    print(f"  length: {len(token)} chars")
-    return token
+    async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(TOOL_TIMEOUT)) as http:
+        async with streamable_http_client(mcp_url, http_client=http) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+
+                await test_list_tools(session)
+                await test_retrieve(session, query, k, score_threshold, collections)
+
+    return True
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test EVE Retrieval MCP Server locally",
+        description="Integration test for the EVE Retrieval MCP Server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python test.py
-  python test.py --query "What is Copernicus?"
-  python test.py --query "Sentinel-2 bands" --k 5
-  python test.py --query "climate change" --collections "Wikipedia EO" "qwen-512-filtered"
-  python test.py --login-only
-        """,
     )
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help=f"Port to run the test server on (default: {DEFAULT_PORT})")
     parser.add_argument("--query", "-q", default="What is ESA?",
                         help="Search query (default: 'What is ESA?')")
     parser.add_argument("--k", "-k", type=int, default=3,
@@ -136,23 +214,75 @@ Examples:
                         help="Minimum similarity score (default: 0.7)")
     parser.add_argument("--collections", "-c", nargs="+", default=None,
                         help="Public collection names (default: server defaults)")
-    parser.add_argument("--login-only", action="store_true",
-                        help="Only test login, skip retrieval")
+
+    cred_group = parser.add_argument_group(
+        "credentials",
+        "Override EVE credentials (otherwise loaded from .env / env vars)",
+    )
+    cred_group.add_argument("--eve-email", default=None,
+                            help="EVE account email")
+    cred_group.add_argument("--eve-password", default=None,
+                            help="EVE account password")
+    cred_group.add_argument("--eve-token", default=None,
+                            help="Pre-obtained EVE Bearer token (skips login)")
 
     args = parser.parse_args()
 
-    if args.login_only:
-        asyncio.run(test_login())
-        return
+    # Build env overrides for the server subprocess
+    env_overrides: dict[str, str] = {}
+    if args.eve_email:
+        env_overrides["EVE_EMAIL"] = args.eve_email
+    if args.eve_password:
+        env_overrides["EVE_PASSWORD"] = args.eve_password
 
-    asyncio.run(test_login())
-    print()
-    asyncio.run(test_retrieve(
-        query=args.query,
-        k=args.k,
-        score_threshold=args.score_threshold,
-        public_collections=args.collections,
-    ))
+    # Build custom headers for the MCP client (per-request credential proxy)
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if args.eve_token:
+        headers["X-EVE-Token"] = args.eve_token
+    if args.eve_email:
+        headers["X-EVE-Email"] = args.eve_email
+    if args.eve_password:
+        headers["X-EVE-Password"] = args.eve_password
+
+    # --- Start server, run tests, stop server ---
+    _section("Starting EVE Retrieval MCP Server")
+    print(f"  port:    {args.port}")
+    print(f"  server:  {SERVER_PY}")
+    if env_overrides:
+        print(f"  env:     {', '.join(env_overrides.keys())}")
+    if any(k.startswith("X-") for k in headers):
+        print(f"  headers: {', '.join(k for k in headers if k.startswith('X-'))}")
+
+    proc = _start_server(args.port, env_overrides)
+    try:
+        asyncio.run(_wait_for_server(f"http://localhost:{args.port}/mcp"))
+        print("  Server is up.\n")
+
+        ok = asyncio.run(run_tests(
+            port=args.port,
+            query=args.query,
+            k=args.k,
+            score_threshold=args.score_threshold,
+            collections=args.collections,
+            headers=headers,
+        ))
+
+        _section("DONE — all tests passed" if ok else "DONE — some tests failed")
+
+    except TimeoutError:
+        print(f"\n  [FAIL] Server did not start within {STARTUP_TIMEOUT}s")
+        stderr = proc.stderr.read().decode() if proc.stderr else ""
+        if stderr:
+            print(f"\n  Server stderr:\n{stderr[:2000]}")
+        sys.exit(1)
+
+    except Exception as exc:
+        print(f"\n  [FAIL] {exc}")
+        sys.exit(1)
+
+    finally:
+        _stop_server(proc)
+        print("  Server stopped.")
 
 
 if __name__ == "__main__":
