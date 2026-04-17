@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   # ─── Detect which servers changed (always succeeds) ──────────────────
-  detect:
+  detect-changes:
     runs-on: ubuntu-latest
     outputs:
       servers: ${{ steps.detect.outputs.servers }}
@@ -51,9 +51,9 @@ jobs:
           fi
 
   # ─── Structural validation (runs independently) ─────────────────────
-  validate:
-    needs: detect
-    if: needs.detect.outputs.has_server == 'true'
+  validate-structure:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_server == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,12 +72,12 @@ jobs:
 
   # ─── Lint with ruff (runs independently) ─────────────────────────────
   lint:
-    needs: detect
-    if: needs.detect.outputs.has_server == 'true'
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_server == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        server: ${{ fromJson(needs.detect.outputs.servers) }}
+        server: ${{ fromJson(needs.detect-changes.outputs.servers) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -93,12 +93,12 @@ jobs:
 
   # ─── Docker build smoke test (runs independently) ────────────────────
   docker-build:
-    needs: detect
-    if: needs.detect.outputs.has_server == 'true'
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_server == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        server: ${{ fromJson(needs.detect.outputs.servers) }}
+        server: ${{ fromJson(needs.detect-changes.outputs.servers) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -112,13 +112,13 @@ jobs:
             -f shared/Dockerfile \
             "servers/${{ matrix.server }}"
 
-  # ─── Flag infrastructure changes for maintainer review ────────────────
-  infra-review:
-    needs: detect
-    if: needs.detect.outputs.has_infra == 'true'
+  # ─── Require maintainer approval when shared infra is touched ─────────
+  flag-infra-changes:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_infra == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Add infra-review label
+      - name: Label PR and request maintainer review
         uses: actions/github-script@v7
         with:
           script: |
@@ -126,7 +126,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              labels: ['infra-review']
+              labels: ['requires-maintainer-review']
             });
             await github.rest.issues.createComment({
               owner: context.repo.owner,
