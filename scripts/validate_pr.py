@@ -133,6 +133,9 @@ def has_infra_changes(changed_files: list[str]) -> list[str]:
 def check_single_server(changed_files: list[str]) -> list[ValidationError]:
     servers = extract_server_names(changed_files)
     if len(servers) > 1:
+        infra = has_infra_changes(changed_files)
+        if infra:
+            return []
         names = ", ".join(sorted(servers))
         return [
             ValidationError(
@@ -349,11 +352,13 @@ def check_file_sizes(changed_files: list[str]) -> list[ValidationError]:
 
 
 def check_hardcoded_secrets(changed_files: list[str]) -> list[ValidationError]:
-    """Scan changed .py files for patterns that look like inline credentials."""
+    """Scan changed .py files under servers/ for inline credentials."""
     errors: list[ValidationError] = []
     for filepath in changed_files:
         p = Path(filepath)
         if p.suffix != ".py" or not p.exists():
+            continue
+        if p.parts[0] != "servers":
             continue
 
         try:

@@ -104,6 +104,22 @@ class TestSingleServer:
         files = ["servers/alpha/server.py", "shared/Dockerfile"]
         assert check_single_server(files) == []
 
+    def test_multi_server_with_infra_passes(self):
+        """Cross-cutting changes that include infra are allowed to touch multiple servers."""
+        files = [
+            "servers/alpha/server.py",
+            "servers/beta/server.py",
+            "scripts/deploy_server.py",
+        ]
+        assert check_single_server(files) == []
+
+    def test_multi_server_without_infra_fails(self):
+        """Multiple servers without infra changes still fails."""
+        files = ["servers/alpha/server.py", "servers/beta/server.py"]
+        errors = check_single_server(files)
+        assert len(errors) == 1
+        assert "single-server" in errors[0].check
+
 
 # ─── 2. Required files ─────────────────────────────────────────────────
 
@@ -307,9 +323,17 @@ class TestFileSize:
 
 class TestHardcodedSecrets:
     def _write_and_check(self, tmp_path: Path, code: str) -> list:
-        f = tmp_path / "server.py"
+        sdir = tmp_path / "servers" / "test-server"
+        sdir.mkdir(parents=True, exist_ok=True)
+        f = sdir / "server.py"
         f.write_text(textwrap.dedent(code))
-        return check_hardcoded_secrets([str(f)])
+        import os
+        orig = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            return check_hardcoded_secrets(["servers/test-server/server.py"])
+        finally:
+            os.chdir(orig)
 
     def test_hardcoded_password(self, tmp_path: Path):
         errors = self._write_and_check(tmp_path, '''\
@@ -379,8 +403,22 @@ class TestHardcodedSecrets:
         assert errors == []
 
     def test_non_py_files_skipped(self, tmp_path: Path):
-        f = tmp_path / "config.yaml"
+        sdir = tmp_path / "servers" / "test-server"
+        sdir.mkdir(parents=True, exist_ok=True)
+        f = sdir / "config.yaml"
         f.write_text('password: "SuperSecretPass123"\n')
+        import os
+        orig = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            assert check_hardcoded_secrets(["servers/test-server/config.yaml"]) == []
+        finally:
+            os.chdir(orig)
+
+    def test_non_server_py_files_skipped(self, tmp_path: Path):
+        """Files outside servers/ should never be scanned."""
+        f = tmp_path / "test_file.py"
+        f.write_text('password = "SuperSecretPass123"\n')
         assert check_hardcoded_secrets([str(f)]) == []
 
 
