@@ -2,11 +2,10 @@
 
 import asyncio
 import json
-import httpx
 
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-
 
 BASE_URL = "http://localhost:8000/mcp"
 TIMEOUT = 30.0
