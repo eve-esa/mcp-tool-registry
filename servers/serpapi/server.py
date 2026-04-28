@@ -49,7 +49,7 @@ def get_api_key() -> str:
         return None
 
 
-mcp = FastMCP("SerpAPI")
+mcp = FastMCP("SerpAPI", host="0.0.0.0", port=8000, stateless_http=True)
 
 
 @mcp.tool()
