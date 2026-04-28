@@ -209,3 +209,5 @@ __marimo__/
 # AgentCore toolkit local state
 .bedrock_agentcore.yaml
 .bedrock_agentcore/
+
+pyproject.toml
