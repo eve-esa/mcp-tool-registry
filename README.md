@@ -4,10 +4,10 @@ A monorepo of MCP servers for Earth Observation (EO) workflows.
 
 Current server examples:
 
-- `servers/effis` — wildfire and remote sensing analysis
-- `servers/eve_retrieval` — document retrieval
-- `servers/serpapi` — web search 
-- `servers/traille` — structured data extraction
+- `servers/effis` - wildfire and remote sensing analysis
+- `servers/eve_retrieval` - document retrieval
+- `servers/serpapi` - web search 
+- `servers/traille` - structured data extraction
 
 ## Quick start
 
@@ -45,5 +45,5 @@ python servers/<server-name>/server.py --transport stdio
 4. Optionally add `.env.template` and `test.py`
 5. Validate locally, then open a PR
 
-For full contribution and deployment rules, see `CONTRIBUTING.md`.
+For full contribution and deployment rules, see [CONTRIBUTING](CONTRIBUTING.md).
 
