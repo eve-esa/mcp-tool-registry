@@ -20,8 +20,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastmcp import FastMCP
-from fastmcp.server.dependencies import get_http_request
+from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
@@ -38,18 +37,26 @@ SERP_HTTP_TIMEOUT = 60.0
 
 
 def get_api_key() -> str:
-    try:
-        request = get_http_request()
-        headers = dict(request.headers)
-        api_key = headers.get("X-API-Key") or headers.get("authorization", "")
-        if api_key.startswith("Bearer "):
-            api_key = api_key[7:]
-        return api_key if api_key else None
-    except Exception:
-        return None
+    headers = _get_request_headers()
+    api_key = headers.get("x-api-key") or headers.get("authorization", "")
+    if api_key.startswith("Bearer "):
+        api_key = api_key[7:]
+    return api_key if api_key else None
 
 
 mcp = FastMCP("SerpAPI", host="0.0.0.0", port=8000, stateless_http=True)
+
+
+def _get_request_headers() -> dict[str, str]:
+    """Return HTTP headers from the current MCP request, or {} on stdio."""
+    try:
+        ctx = mcp.get_context()
+        request = ctx.request_context.request
+        if request is not None and hasattr(request, "headers"):
+            return dict(request.headers)
+    except Exception:
+        pass
+    return {}
 
 
 @mcp.tool()
@@ -116,11 +123,9 @@ if __name__ == "__main__":
         default="streamable-http",
         help="Transport type (default: streamable-http)",
     )
-    parser.add_argument("--port", type=int, default=8000, help="Port for HTTP transport")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host for HTTP transport")
     args = parser.parse_args()
 
     if args.transport == "stdio":
-        mcp.run(transport="stdio", host=args.host, port=args.port)
+        mcp.run(transport="stdio")
     else:
-        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+        mcp.run(transport="streamable-http")
