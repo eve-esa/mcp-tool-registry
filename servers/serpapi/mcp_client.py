@@ -1,3 +1,5 @@
+"""test using fastmcp client"""
+
 import asyncio
 import os
 
