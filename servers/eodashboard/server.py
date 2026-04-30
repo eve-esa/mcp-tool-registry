@@ -244,7 +244,7 @@ def get_narrative_indicators(narrative_title: str) -> str:
 
     narrative_info = cache.narrative_to_indicators.get(narrative_title.lower().strip())
     if not narrative_info:
-        for nar_title in cache.narrative_to_indicators.keys():
+        for nar_title in cache.narrative_to_indicators:
             if narrative_title.lower().strip() in nar_title.lower().strip():
                 narrative_info = cache.narrative_to_indicators[nar_title]
                 narrative_title = nar_title
