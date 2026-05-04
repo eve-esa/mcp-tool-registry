@@ -1,6 +1,6 @@
-from mcp.server.fastmcp import FastMCP
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
+from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("EOTDL Server", host="0.0.0.0", port=8000, stateless_http=True)
 
