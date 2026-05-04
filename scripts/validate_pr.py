@@ -385,6 +385,30 @@ def check_hardcoded_secrets(changed_files: list[str]) -> list[ValidationError]:
     return errors
 
 
+def check_server_startup(server_name: str) -> list[ValidationError]:
+    """Verify the server can be imported without errors."""
+    errors: list[ValidationError] = []
+    server_dir = Path("servers") / server_name
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys; sys.path.insert(0, '.'); import server"],
+        capture_output=True,
+        text=True,
+        cwd=server_dir,
+        timeout=15,
+    )
+
+    if result.returncode != 0:
+        errors.append(
+            ValidationError(
+                "server-startup",
+                f"servers/{server_name}/server.py: server did not startup",
+            )
+        )
+
+    return errors
+
+
 def run_ruff_lint(server_name: str) -> bool:
     """Run ruff on the server directory, printing GitHub annotations.
 
@@ -454,6 +478,7 @@ def main() -> None:
         all_errors.extend(check_entrypoint_schema(server_name))
         all_errors.extend(check_requirements_txt(server_name))
         all_errors.extend(check_env_template(server_name))
+        all_errors.extend(check_server_startup(server_name))
 
     infra_files = has_infra_changes(changed_files)
     if infra_files:
