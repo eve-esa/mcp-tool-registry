@@ -45,5 +45,5 @@ python servers/<server-name>/server.py --transport stdio
 4. Optionally add `.env.template` and `test.py`
 5. Validate locally, then open a PR
 
-For full contribution and deployment rules, see [CONTRIBUTING](CONTRIBUTING.md).
+For full contribution and deployment rules, see [CONTRIBUTING GUIDE](CONTRIBUTING.md).
 
