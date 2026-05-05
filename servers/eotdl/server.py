@@ -11,6 +11,12 @@ client = Client(transport)
 
 @mcp.tool()
 async def eotdl_search(query: str) -> str:
+    """
+    Search for datasets, models, and pipelines in the EOTDL (https://www.eotdl.com/).
+    Args:
+        query: Query string for the retrieval
+    :return: Formatted string of relevant documents
+    """
     async with client:
         result = await client.call_tool("eotdl_search", {
                 "query": query,
