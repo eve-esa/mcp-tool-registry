@@ -42,11 +42,10 @@ async def geocode_place(
     limit: int = 5,
 ) -> str:
     """
-    Convert a place name to a bounding box for use with the fire tools.
+    Convert a place name to a bounding box.
 
     Geocodes a place name (city, region, country, landmark, etc.) into a
-    bounding box string in "west,south,east,north" format — the same format
-    accepted by get_effis_burnt_areas and other tools.
+    bounding box string in "west,south,east,north" format.
 
     Uses the OpenStreetMap Nominatim API (free, no API key required).
 
