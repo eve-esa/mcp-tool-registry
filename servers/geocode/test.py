@@ -5,7 +5,6 @@ import asyncio
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
-
 transport = StreamableHttpTransport(
     url="http://localhost:8000/mcp",
 )
