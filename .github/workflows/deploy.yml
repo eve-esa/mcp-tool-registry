@@ -83,6 +83,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Image build: scripts/deploy_server.py uses servers/<server>/Dockerfile when
+      # that file exists; otherwise shared/Dockerfile (see _resolve_dockerfile).
+
       # Inject runtime secrets from GitHub Secrets into .env file.
       # Reads ${VAR_NAME} placeholders from the server's .env.template
       # and resolves each from the full secrets context automatically.

@@ -1,0 +1,7 @@
+# Avoid sending a local cache to the daemon; image builds its own via Dockerfile RUN.
+effis_layer/
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+.git/

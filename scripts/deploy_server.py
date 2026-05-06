@@ -17,8 +17,24 @@ Usage:
 import argparse
 import os
 import subprocess
+from pathlib import Path
 
 import boto3
+
+
+def _resolve_dockerfile(server_name: str) -> tuple[str, str]:
+    """Return ``(dockerfile_path, build_context)`` relative to the process cwd.
+
+    If ``servers/<name>/Dockerfile`` exists, use it; otherwise ``shared/Dockerfile``.
+    """
+    ctx = f"servers/{server_name}"
+    custom = Path(ctx) / "Dockerfile"
+    if custom.is_file():
+        path = str(custom)
+        print(f"  Using custom Dockerfile: {path}")
+        return path, ctx
+    print("  Using shared Dockerfile: shared/Dockerfile")
+    return "shared/Dockerfile", ctx
 
 
 def build_and_push_image(server_name: str, account_id: str, region: str) -> str:
@@ -55,15 +71,21 @@ def build_and_push_image(server_name: str, account_id: str, region: str) -> str:
         check=True,
     )
 
+    dockerfile, build_context = _resolve_dockerfile(server_name)
     print(f"  Building image for {server_name} (linux/arm64)...")
     subprocess.run(
         [
-            "docker", "buildx", "build",
-            "--platform", "linux/arm64",
-            "-f", "shared/Dockerfile",
-            "-t", image_uri,
+            "docker",
+            "buildx",
+            "build",
+            "--platform",
+            "linux/arm64",
+            "-f",
+            dockerfile,
+            "-t",
+            image_uri,
             "--load",
-            f"servers/{server_name}",
+            build_context,
         ],
         check=True,
     )
