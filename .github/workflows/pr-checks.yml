@@ -64,6 +64,12 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install server dependencies
+        run: |
+          for server in ${{ needs.detect-changes.outputs.servers }}; do
+            pip install -r "servers/$server/requirements.txt"
+          done
+
       - name: Run structural validation
         run: |
           BASE_REF="origin/${{ github.base_ref }}"
