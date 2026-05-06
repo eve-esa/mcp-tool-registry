@@ -65,12 +65,16 @@ jobs:
           python-version: "3.13"
 
       - name: Install server dependencies
+        env:
+          CHANGED_SERVERS: ${{ needs.detect-changes.outputs.servers }}
         run: |
           python -c "
           import json
+          import os
           import subprocess
-          servers = json.loads('''${{ needs.detect-changes.outputs.servers }}''')
+          servers = json.loads(os.environ.get('CHANGED_SERVERS', '[]'))
           for s in servers:
+              print(f'Installing requirements for {s}')
               subprocess.run(['pip', 'install', '-r', f'servers/{s}/requirements.txt'], check=True)
           "
 
