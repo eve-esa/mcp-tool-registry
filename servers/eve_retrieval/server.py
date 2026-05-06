@@ -78,6 +78,8 @@ def _resolve_eve_creds() -> tuple[str, str]:
     headers = _get_request_headers()
     email = headers.get("x-eve-email", "") or EVE_EMAIL
     password = headers.get("x-eve-password", "") or EVE_PASSWORD
+    log.info(f"email received: {email}")
+    log.info(f"password eceived: {password}")
     return email, password
 
 
