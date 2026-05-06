@@ -15,10 +15,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # ~200 MiB compressed from EFFIS WFS; allow up to 30 min on slow links / emulated ARM builds.
+# Prefer HTTPS; fall back to HTTP only when HTTPS download fails (e.g. temporary cert issue).
 ARG EFFIS_SHAPEZIP_URL="https://maps.effis.emergency.copernicus.eu/effis?service=WFS&request=GetFeature&typename=ms:modis.ba.poly&version=1.1.0&outputformat=SHAPEZIP"
+ARG EFFIS_SHAPEZIP_FALLBACK_URL="http://maps.effis.emergency.copernicus.eu/effis?service=WFS&request=GetFeature&typename=ms:modis.ba.poly&version=1.1.0&outputformat=SHAPEZIP"
 RUN mkdir -p effis_layer \
-    && curl -fSL --connect-timeout 60 --max-time 1800 \
+    && (curl -fSL --connect-timeout 60 --max-time 1800 \
         "${EFFIS_SHAPEZIP_URL}" -o /tmp/effis_modis.poly.zip \
+        || (echo "HTTPS download failed, retrying over HTTP fallback..." >&2 \
+            && curl -fSL --connect-timeout 60 --max-time 1800 \
+            "${EFFIS_SHAPEZIP_FALLBACK_URL}" -o /tmp/effis_modis.poly.zip)) \
     && unzip -oq /tmp/effis_modis.poly.zip -d effis_layer \
     && rm -f /tmp/effis_modis.poly.zip \
     && test -f effis_layer/modis.ba.poly.shp
