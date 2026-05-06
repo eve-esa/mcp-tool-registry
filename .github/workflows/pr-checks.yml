@@ -63,12 +63,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      
+
       - name: Install server dependencies
         run: |
-          for server in ${{ needs.detect-changes.outputs.servers }}; do
-            pip install -r "servers/$server/requirements.txt"
-          done
+          python -c "
+          import json
+          import subprocess
+          servers = json.loads('''${{ needs.detect-changes.outputs.servers }}''')
+          for s in servers:
+              subprocess.run(['pip', 'install', '-r', f'servers/{s}/requirements.txt'], check=True)
+          "
 
       - name: Run structural validation
         run: |
@@ -97,7 +101,7 @@ jobs:
       - name: Lint server (${{ matrix.server }})
         run: ruff check servers/${{ matrix.server }}/
 
-  # ─── Docker build smoke test (runs independently) ────────────────────
+  # Docker build smoke test (runs independently)
   docker-build:
     needs: detect-changes
     if: needs.detect-changes.outputs.has_server == 'true'
