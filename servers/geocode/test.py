@@ -21,7 +21,8 @@ async def main():
         print(result)
         result = await client.call_tool("reverse_geocode_place", {
             "latitude": 40.748817,
-            "longitude": -73.985428
+            "longitude": -73.985428,
+            "zoom": 3,
         })
         print(result)
 

@@ -128,6 +128,7 @@ async def geocode_place(
 async def reverse_geocode_place(
     latitude: float,
     longitude: float,
+    zoom: int = 18,
 ) -> str:
     """
     Convert latitude and longitude to a place name (reverse geocoding).
@@ -137,14 +138,23 @@ async def reverse_geocode_place(
     Args:
         latitude:  Latitude coordinate.
         longitude: Longitude coordinate.
+        zoom:      Detail level from 0 (country) to 18 (building).
 
     Returns:
         JSON with the place name and address details.
     """
     logger.info("Reverse geocoding: %s, %s", latitude, longitude)
 
+    if not 0 <= zoom <= 18:
+        return json.dumps(
+            {
+                "error": "Zoom must be between 0 and 18.",
+                "zoom": zoom,
+            }
+        )
+
     try:
-        location = geolocator.reverse(f"{latitude}, {longitude}")
+        location = geolocator.reverse(f"{latitude}, {longitude}", zoom=zoom)
     except Exception as exc:
         return json.dumps({"error": f"Reverse geocoding failed: {exc}"})
 
