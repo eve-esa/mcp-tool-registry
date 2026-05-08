@@ -8,7 +8,7 @@ mcp = FastMCP("dummy image")
 
 @mcp.tool()
 def get_sample_image(color: str = "blue") -> ImageContent:
-    img = Image.new("RGB", (100, 100), color=color)
+    img = Image.new("RGB", (10000, 10000), color=color)
     
     buffered = BytesIO()
     img.save(buffered, format="PNG")
