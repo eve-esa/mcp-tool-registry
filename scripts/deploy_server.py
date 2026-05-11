@@ -22,6 +22,12 @@ from pathlib import Path
 import boto3
 
 
+DEFAULT_HEADER_ALLOWLIST: dict[str, list[str]] = {
+    "effis": ["X-CDSE-Client-Id", "X-CDSE-Client-Secret"],
+    "serpapi": ["X-API-Key"],
+    "eve_retrieval": ["X-EVE-Token", "X-EVE-Email", "X-EVE-Password"],
+}
+
 def _resolve_dockerfile(server_name: str) -> tuple[str, str]:
     """Return ``(dockerfile_path, build_context)`` relative to the process cwd.
 
@@ -127,6 +133,19 @@ def _build_authorizer_config(
     return None
 
 
+def _build_header_config(headers: list[str] | None) -> dict | None:
+    if not headers:
+        return None
+    return {
+        "requestHeaderAllowlist": headers
+    }
+
+
+def _get_default_headers_for_server(server_name: str) -> list[str] | None:
+    """Return default header allowlist for known servers."""
+    return DEFAULT_HEADER_ALLOWLIST.get(server_name)
+
+
 def deploy_to_agentcore(
     server_name: str,
     image_uri: str,
@@ -134,11 +153,13 @@ def deploy_to_agentcore(
     execution_role_arn: str,
     cognito_discovery_url: str | None = None,
     cognito_client_id: str | None = None,
+    header_allowlist: list[str] | None = None,
 ) -> str:
     client = boto3.client("bedrock-agentcore-control", region_name=region)
 
     existing = find_runtime_by_name(client, server_name)
     auth_config = _build_authorizer_config(cognito_discovery_url, cognito_client_id)
+    header_config = _build_header_config(header_allowlist)
 
     if existing:
         runtime_id = existing["agentRuntimeId"]
@@ -157,6 +178,9 @@ def deploy_to_agentcore(
 
         if auth_config:
             update_kwargs["authorizerConfiguration"] = auth_config
+
+        if header_config:
+            update_kwargs["requestHeaderConfiguration"] = header_config
 
         client.update_agent_runtime(**update_kwargs)
         print(f"  Updated:  {runtime_arn}")
@@ -178,6 +202,9 @@ def deploy_to_agentcore(
         if auth_config:
             create_kwargs["authorizerConfiguration"] = auth_config
 
+        if header_config:
+            create_kwargs["requestHeaderConfiguration"] = header_config
+
         response = client.create_agent_runtime(**create_kwargs)
         runtime_arn = response["agentRuntimeArn"]
         print(f"  Created:  {runtime_arn}")
@@ -192,7 +219,20 @@ def main():
     parser.add_argument("--execution-role-arn", required=True)
     parser.add_argument("--cognito-discovery-url", default=None)
     parser.add_argument("--cognito-client-id", default=None)
+    parser.add_argument(
+        "--header-allowlist",
+        default=None,
+        help="Comma-separated list of headers to allow (e.g. 'X-API-Key,X-Custom-Header')",
+    )
     args = parser.parse_args()
+
+    header_allowlist = None
+    if args.header_allowlist:
+        header_allowlist = [h.strip() for h in args.header_allowlist.split(",") if h.strip()]
+    else:
+        header_allowlist = _get_default_headers_for_server(args.server_name)
+        if header_allowlist:
+            print(f"  Using default headers for {args.server_name}: {header_allowlist}")
 
     print(f"\n{'='*60}")
     print(f"  Deploying MCP server: {args.server_name}")
@@ -209,6 +249,7 @@ def main():
         execution_role_arn=args.execution_role_arn,
         cognito_discovery_url=args.cognito_discovery_url,
         cognito_client_id=args.cognito_client_id,
+        header_allowlist=header_allowlist,
     )
 
     print(f"\n  Deployed ARN: {arn}")
