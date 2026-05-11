@@ -401,6 +401,29 @@ def _resolve_my_creds() -> tuple[str, str]:
 
 **Important:** resolve credentials once at the start of the tool handler and pass them through to internal functions. The MCP request context may not be available during later async operations (e.g. token refresh callbacks).
 
+#### Deploying with custom headers
+
+When you deploy a server with custom headers to AgentCore, you must also configure the header allowlist in `scripts/deploy_server.py`. Without this, AgentCore will drop the headers before passing them to your server.
+
+1. **Add default headers** to `DEFAULT_HEADER_ALLOWLIST` in `deploy_server.py`:
+
+   ```python
+   DEFAULT_HEADER_ALLOWLIST: dict[str, list[str]] = {
+       "effis": ["X-CDSE-Client-Id", "X-CDSE-Client-Secret"],
+       "serpapi": ["X-API-Key"],
+       "eve_retrieval": ["X-EVE-Token", "X-EVE-Email", "X-EVE-Password"],
+       # Add your server here:
+       "my-server": ["X-My-Api-Key", "X-My-Api-Secret"],
+   }
+   ```
+
+2. **Or pass via CLI** when deploying:
+   ```bash
+   python scripts/deploy_server.py --server-name my-server --header-allowlist "X-My-Api-Key,X-My-Api-Secret" ...
+   ```
+
+> **Note:** Header names must be valid HTTP headers (alphanumeric, hyphens, underscores) and cannot start with `x-amz-` or `x-amzn-` (except `X-Amzn-Bedrock-AgentCore-Runtime-Custom-*`). See [AWS docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-header-allowlist.html#runtime-header-restrictions) for restricted headers.
+
 ---
 
 ## CI Rules and PR Checklist
@@ -434,4 +457,5 @@ Copy this checklist into your PR description:
 - [ ] No files larger than 5 MB
 - [ ] Local test passes (`python test.py` or manual curl test)
 - [ ] Docker build succeeds (`docker build -f shared/Dockerfile servers/my-server/`)
+- [ ] If server uses credential headers, added header allowlist to `scripts/deploy_server.py`
 ```
