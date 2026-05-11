@@ -39,6 +39,24 @@ SERP_HTTP_TIMEOUT = 60.0
 mcp = FastMCP("SerpAPI", host="0.0.0.0", port=8000, stateless_http=True)
 
 
+def _get_request_headers() -> dict[str, str]:
+    """Return HTTP headers from the current MCP request, or {} on stdio."""
+    try:
+        ctx = mcp.get_context()
+        request = ctx.request_context.request
+        if request is not None and hasattr(request, "headers"):
+            return dict(request.headers)
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_serpapi_key() -> str:
+    """Resolve SerpAPI key: prefer per-request header, fall back to env."""
+    headers = _get_request_headers()
+    return headers.get("x-api-key", "") or SERPAPI_KEY
+
+
 @mcp.tool()
 async def search_google(
     query: str,
@@ -55,7 +73,7 @@ async def search_google(
         JSON string containing a list of results with title, url, and snippet.
     """
     if not api_key:
-        api_key = SERPAPI_KEY
+        api_key = _resolve_serpapi_key()
 
     if not api_key:
         return json.dumps({
