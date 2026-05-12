@@ -211,3 +211,4 @@ __marimo__/
 .bedrock_agentcore/
 
 pyproject.toml
+agentcore_tests/
