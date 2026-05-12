@@ -1,6 +1,7 @@
 """Entry point for the EVE MCP server."""
 
-from eve_mcp.server import mcp
+from fastmcp import FastMCP
+mcp = FastMCP("eve-mcp", host="0.0.0.0", port=8000, stateless_http=True)
 
 if __name__ == "__main__":
     import argparse
