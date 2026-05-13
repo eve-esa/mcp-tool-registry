@@ -1,12 +1,10 @@
 
-from dotenv import load_dotenv
+# load_dotenv()
+import os
+
 from mcp.server.fastmcp import FastMCP
 from trallie.data_extraction.data_extractor import DataExtractor
 from trallie.schema_generation.schema_generator import SchemaGenerator
-
-# load_dotenv()
-
-import os
 
 DEFAULT_PROVIDER = "groq"
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
