@@ -1,26 +1,28 @@
-from typing import Optional, List
-from dotenv import load_dotenv
-load_dotenv()
 
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from trallie.schema_generation.schema_generator import SchemaGenerator
 from trallie.data_extraction.data_extractor import DataExtractor
+from trallie.schema_generation.schema_generator import SchemaGenerator
+
+load_dotenv()
 
 DEFAULT_PROVIDER = "groq"
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
-mcp = FastMCP("Trallie MCP")
+mcp = FastMCP("Trallie MCP", host="0.0.0.0", port=8000, stateless_http=True)
+
 
 def get_fallback(value, default):
     return value if value else default
 
+
 @mcp.tool()
 def extract_data(
     description: str,
-    records: List[str],
-    provider: Optional[str] = None,
-    model_name: Optional[str] = None,
-    schema_fields: Optional[List[str]] = None,
+    records: list[str],
+    provider: str | None = None,
+    model_name: str | None = None,
+    schema_fields: list[str] | None = None,
     return_schema: bool = True,
 ):
     """
@@ -30,33 +32,28 @@ def extract_data(
     The schema can either be provided or automatically discovered using the model.
 
     Args:
-        description (str): 
+        description (str):
             A natural language description of what information to extract.
-            This helps guide schema discovery if `schema_fields` is not provided.
-        
-        records (List[str]): 
+            This helps guide schema discovery if `schema_fields`is not provided.
+        records (List[str]):
             A list of raw text inputs from which information is to be extracted.
-        
-        provider (Optional[str], default="openai"): 
+        provider (Optional[str], default="openai"):
             The name of the language model provider (e.g., "openai", "anthropic").
             If not specified, defaults to the value of `DEFAULT_PROVIDER`.
-        
-        model_name (Optional[str], default="gpt-4o"): 
+        model_name (Optional[str], default="gpt-4o"):
             The name of the specific model to use from the selected provider.
             Defaults to `DEFAULT_MODEL` if not supplied.
-        
-        schema_fields (Optional[List[str]], default=None): 
+        schema_fields (Optional[List[str]], default=None):
             A list of field names representing the schema to extract.
             If None, the schema is automatically generated using the `SchemaGenerator`
             based on the `description` and the input `records`.
-        
-        return_schema (bool, default=True): 
+        return_schema (bool, default=True):
             Whether to return the schema alongside the extracted data.
             If True, returns a dictionary with both the schema and extracted results.
             If False, returns only the extracted data list.
 
     Returns:
-        Union[Dict[str, Any], List[Dict[str, Any]]]: 
+        Union[Dict[str, Any], List[Dict[str, Any]]]:
             If `return_schema` is True:
                 {
                     "schema": List[str],        # The list of extracted field names
@@ -66,7 +63,7 @@ def extract_data(
                 List[Dict[str, Any]]  # Only the extracted values per input record
     """
 
-    
+
     provider = get_fallback(provider, DEFAULT_PROVIDER)
     model_name = get_fallback(model_name, DEFAULT_MODEL)
 
@@ -92,7 +89,7 @@ def extract_data(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Traille MCP Server")
+    parser = argparse.ArgumentParser(description="Trallie MCP Server")
     parser.add_argument(
         "--transport",
         choices=["stdio", "streamable-http"],
