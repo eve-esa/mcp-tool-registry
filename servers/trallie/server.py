@@ -1,15 +1,49 @@
 
-from dotenv import load_dotenv
+# load_dotenv()
+import os
+
 from mcp.server.fastmcp import FastMCP
 from trallie.data_extraction.data_extractor import DataExtractor
 from trallie.schema_generation.schema_generator import SchemaGenerator
-
-load_dotenv()
 
 DEFAULT_PROVIDER = "groq"
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 mcp = FastMCP("Trallie MCP", host="0.0.0.0", port=8000, stateless_http=True)
+
+
+def _get_request_headers() -> dict[str, str]:
+    """Return HTTP headers from the current MCP request, or {} on stdio."""
+    try:
+        ctx = mcp.get_context()
+        request = ctx.request_context.request
+        if request is not None and hasattr(request, "headers"):
+            return dict(request.headers)
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_api_key(provider: str) -> str:
+    """Resolve API key: prefer per-request header, fall back to env."""
+    headers = _get_request_headers()
+    header_key = headers.get("x-api-key", "")
+    if header_key:
+        return header_key
+
+    env_keys = {
+        "groq": "GROQ_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }
+    return os.getenv(env_keys.get(provider.lower(), f"{provider.upper()}_API_KEY"), "")
+
+
+def _resolve_provider_model(headers: dict[str, str]) -> tuple[str, str]:
+    """Resolve provider and model from headers, fallback to defaults."""
+    provider = headers.get("x-provider", "").strip() or DEFAULT_PROVIDER
+    model = headers.get("x-model", "").strip() or DEFAULT_MODEL
+    return provider, model
 
 
 def get_fallback(value, default):
@@ -64,8 +98,15 @@ def extract_data(
     """
 
 
-    provider = get_fallback(provider, DEFAULT_PROVIDER)
-    model_name = get_fallback(model_name, DEFAULT_MODEL)
+    headers = _get_request_headers()
+    header_provider, header_model = _resolve_provider_model(headers)
+    provider = get_fallback(provider, header_provider)
+    model_name = get_fallback(model_name, header_model)
+    api_key = _resolve_api_key(provider)
+
+    if api_key:
+        env_key = f"{provider.upper()}_API_KEY"
+        os.environ[env_key] = api_key
 
     data_extractor = DataExtractor(provider=provider, model_name=model_name)
 

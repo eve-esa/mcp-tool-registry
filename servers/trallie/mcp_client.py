@@ -1,23 +1,24 @@
 import asyncio
-import sys
+import os
 
+from dotenv import load_dotenv
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
+load_dotenv()
 
-def create_client(url: str = "http://localhost:8000/mcp") -> Client:
-    transport = StreamableHttpTransport(url=url)
-    return Client(transport)
+API_KEY = os.getenv("GROQ_API_KEY", "")
 
+transport = StreamableHttpTransport(
+    url="http://localhost:8000/mcp",
+    headers={"X-API-Key": API_KEY}
+)
+
+client = Client(transport)
 
 async def main():
-    url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8000/mcp"
-
-    client = create_client(url)
-
     async with client:
         await client.ping()
-        print(f"Connected to {url}")
 
         tools = await client.list_tools()
         print("Tools:", [t.name for t in tools])
