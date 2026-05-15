@@ -1,1 +1,0 @@
-"""EVE MCP server."""

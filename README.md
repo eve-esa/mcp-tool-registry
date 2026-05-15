@@ -7,6 +7,7 @@ Current server examples:
 - `servers/effis` - wildfire and remote sensing analysis
 - `servers/eve_retrieval` - document retrieval
 - `servers/serpapi` - web search 
+- `servers/geocode` - geocode places
 - `servers/trallie` - structured data extraction
 
 ## Quick start
