@@ -1,4 +1,4 @@
-# EO MCP Tool Registry
+# MCP Tool Registry
 
 A monorepo of MCP servers for Earth Observation (EO) workflows.
 
