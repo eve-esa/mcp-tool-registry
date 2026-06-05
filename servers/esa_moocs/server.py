@@ -22,7 +22,6 @@ Requirements:
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -97,7 +96,10 @@ def _retrieve(query: str, top_k: int = 20) -> list[tuple[float, dict]]:
 def _rerank(query: str, hits: list[tuple[float, dict]], top_k: int = 5) -> list[tuple[float, dict]]:
     pairs = [(query, h[1].get("content", "")) for h in hits]
     scores = _get_reranker().predict(pairs)
-    ranked = sorted(zip(scores.tolist(), [h[1] for h in hits]), reverse=True)
+    ranked = sorted(
+        zip(scores.tolist(), [h[1] for h in hits], strict=False),
+        reverse=True,
+    )
     return ranked[:top_k]
 
 
