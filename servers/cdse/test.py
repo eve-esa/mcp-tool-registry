@@ -39,24 +39,7 @@ def info(msg: str) -> str: return f"{CYAN}▸  {msg}{RESET}"
 def head(msg: str) -> str: return f"\n{BOLD}{YELLOW}{msg}{RESET}"
 
 
-# def _save_result(result, name: str) -> None:
-#     """Print text blocks and save any image block; print coloured status."""
-#     saved = False
-#     for block in result.content:
-#         if block.type == "text":
-#             # Only print non-empty, non-trivial text
-#             text = block.text.strip()
-#             if text:
-#                 print(f"    {text}")
-#         elif block.type == "image":
-#             img_bytes = base64.b64decode(block.data)
-#             out_path = OUT_DIR / f"{name}.jpg"
-#             out_path.write_bytes(img_bytes)
-#             print(ok(f"image saved → {out_path}  ({len(img_bytes):,} bytes)"))
-#             saved = True
 
-#     if not saved:
-#         print(err("no image returned"))
 def _save_result(result, name: str) -> bool:
     """Print text blocks and save any image block; print coloured status.
     Returns True if an image was saved, False otherwise."""
