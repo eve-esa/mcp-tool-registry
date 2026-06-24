@@ -259,7 +259,7 @@ async def main():
 
     params = StdioServerParameters(
         command="python",
-        args=[SERVER],
+        args=[SERVER, "--transport", "stdio"],
         env={
             **os.environ,
             "CDSE_CLIENT_ID":     os.environ["CDSE_CLIENT_ID"],
