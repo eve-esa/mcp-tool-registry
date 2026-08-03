@@ -1,0 +1,5 @@
+# mcp is pinned: newer releases dropped the vendored mcp.server.fastmcp module
+# (moved to the standalone `fastmcp` package), which would break this server —
+# and any other server in this repo built against an unpinned mcp.
+mcp[cli]==1.27.0
+pillow>=10.4.0
