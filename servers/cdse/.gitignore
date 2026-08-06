@@ -1,0 +1,4 @@
+.env
+notebooks/
+test_outputs/
+mcp_test.py
