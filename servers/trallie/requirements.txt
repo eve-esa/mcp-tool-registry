@@ -1,3 +1,8 @@
+# server.py imports mcp.server.fastmcp, but `mcp` was never declared here: it only
+# arrived transitively (mcp-server depends on mcp>=1.6.0), so it floated to 2.x.
+# mcp is pinned: 2.x dropped the vendored mcp.server.fastmcp module (FastMCP was
+# renamed MCPServer), so an unpinned mcp breaks the build.
+mcp[cli]==1.27.0
 mcp-server>=0.1.0
 trallie>=0.1.0
-openai>=1.0.0 
+openai>=1.0.0
