@@ -2,5 +2,13 @@
 # renamed MCPServer). server.py imports it, so an unpinned mcp breaks the build.
 mcp[cli]==1.27.0
 qdrant-client>=1.9.0
-sentence-transformers>=3.0.0
+# sentence-transformers is pinned for the same reason mcp is, one level out. The
+# Dockerfile installs torch==2.13.0+cpu from the PyTorch CPU index first, and then
+# runs this file against plain PyPI. 5.7.0 asks for torch>=1.11.0, so the CPU build
+# survives; the day a release asks for torch>2.13.0, pip would swap in the fat PyPI
+# wheel that bundles CUDA and put the image back over the 2048 MB AgentCore quota.
+# The Dockerfile asserts the +cpu tag and fails the build if that happens, but PR CI
+# builds shared/Dockerfile, so the first thing to notice would be a red deploy on
+# main. Pinning keeps that out of the deploy path.
+sentence-transformers==5.7.0
 python-dotenv>=1.0.0

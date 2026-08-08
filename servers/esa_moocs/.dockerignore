@@ -1,0 +1,16 @@
+# data/ and qdrant_storage/ are deliberately NOT ignored: server.py reads the
+# committed 343-point Qdrant store at runtime and _ensure_ingested() falls back
+# to data/MOOC.jsonl if it is ever empty. Together they are ~6 MB.
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+.git/
+
+# Local-only test harness; it imports server at module scope and is never run in
+# the container. ingest.py is NOT ignored: server.py imports it lazily in the
+# empty-collection fallback path.
+test.py
+
+# Qdrant's local-mode lock file, if a local run left one behind.
+qdrant_storage/.lock
