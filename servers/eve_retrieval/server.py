@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(mes
 
 EVE_EMAIL = os.getenv("EVE_EMAIL", "")
 EVE_PASSWORD = os.getenv("EVE_PASSWORD", "")
-EVE_API_BASE_URL = os.getenv("EVE_API_BASE_URL", "https://dev.eve-chat.chat")
+EVE_API_BASE_URL = os.getenv("EVE_API_BASE_URL", "https://dev.eve-chat.chat/api")
 
 _HTTP_TIMEOUT = 120.0
 
