@@ -24,12 +24,10 @@ Each tool returns:
 from __future__ import annotations
 
 import json
-import os
 from typing import Annotated, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
-from dotenv import load_dotenv
 
 
 from helper import (
