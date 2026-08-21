@@ -189,8 +189,6 @@ async def retrieve(
         score_threshold: Minimum similarity score to keep a document (0.0–1.0).
         max_new_tokens: Token budget for rewrite generation (100–100000).
         public_collections: Public collection names to include in retrieval.
-            Defaults to ['Wiley AI Gateway', 'Wikipedia EO',
-            'qwen-512-filtered'] when None.
 
     Returns:
         JSON string containing retrieved_docs, latencies, original_query,
@@ -209,9 +207,6 @@ async def retrieve(
                 )
             }
         )
-
-    if public_collections is None:
-        public_collections = ["Wiley AI Gateway", "Wikipedia EO", "qwen-512-filtered"]
 
     body: dict[str, Any] = {
         "query": query,
