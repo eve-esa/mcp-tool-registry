@@ -3,7 +3,7 @@
 Integration test for the EVE Retrieval MCP Server.
 
 Starts the server locally on HTTP, connects with an MCP client, and
-exercises every tool through the protocol — exactly as a real caller would.
+exercises every tool through the protocol, exactly as a real caller would.
 
 Credentials come from .env / env vars by default.  Override them from
 the command line to test the per-request header proxy flow.
@@ -17,7 +17,7 @@ Usage:
     python test.py --eve-token eyJhbGciOi...
 
     # Custom query:
-    python test.py --query "What is Copernicus?" --k 5
+    python test.py --query "What is Copernicus?" --k 10 -c "Wikipedia EO"
 
     # Specify port (default: 9100):
     python test.py --port 9200
@@ -174,6 +174,12 @@ async def test_retrieve(
             if text:
                 print(f"         {text}...")
 
+    if collections and not docs:
+        raise AssertionError(
+            f"retrieve returned no documents for collections {collections}; "
+            "expected at least one hit"
+        )
+
     print("  [PASS] retrieve returned valid response")
     return parsed
 
@@ -208,12 +214,13 @@ def main():
                         help=f"Port to run the test server on (default: {DEFAULT_PORT})")
     parser.add_argument("--query", "-q", default="What is ESA?",
                         help="Search query (default: 'What is ESA?')")
-    parser.add_argument("--k", "-k", type=int, default=3,
-                        help="Number of documents to retrieve (default: 3)")
-    parser.add_argument("--score-threshold", "-s", type=float, default=0.7,
-                        help="Minimum similarity score (default: 0.7)")
+    parser.add_argument("--k", "-k", type=int, default=10,
+                        help="Number of documents to retrieve (default: 10)")
+    parser.add_argument("--score-threshold", "-s", type=float, default=0.6,
+                        help="Minimum similarity score (default: 0.6)")
     parser.add_argument("--collections", "-c", nargs="+", default=None,
-                        help="Public collection names (default: server defaults)")
+                        help="Public collection names to search (the tool has no default; "
+                             "without them the backend returns no documents)")
 
     cred_group = parser.add_argument_group(
         "credentials",
@@ -267,7 +274,7 @@ def main():
             headers=headers,
         ))
 
-        _section("DONE — all tests passed" if ok else "DONE — some tests failed")
+        _section("DONE: all tests passed" if ok else "DONE: some tests failed")
 
     except TimeoutError:
         print(f"\n  [FAIL] Server did not start within {STARTUP_TIMEOUT}s")
