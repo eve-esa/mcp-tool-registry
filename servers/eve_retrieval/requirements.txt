@@ -1,4 +1,4 @@
-# EVE Retrieval MCP Server — Dependencies
+# EVE Retrieval MCP Server dependencies
 # mcp is pinned: 2.x dropped the vendored mcp.server.fastmcp module (FastMCP was
 # renamed MCPServer). server.py imports it, so an unpinned mcp breaks the build.
 mcp[cli]==1.27.0
