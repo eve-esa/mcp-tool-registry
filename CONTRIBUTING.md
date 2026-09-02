@@ -291,9 +291,7 @@ This pattern allows multiple users to share a single deployed server while each 
 |--------|--------|---------|
 | `effis` | `X-CDSE-Client-Id` | Copernicus Data Space OAuth client ID |
 | `effis` | `X-CDSE-Client-Secret` | Copernicus Data Space OAuth client secret |
-| `eve_retrieval` | `X-EVE-Token` | Pre-obtained EVE Bearer token (skips login) |
-| `eve_retrieval` | `X-EVE-Email` | EVE account email (used with `X-EVE-Password`) |
-| `eve_retrieval` | `X-EVE-Password` | EVE account password |
+| `eve_retrieval` | `X-EVE-Token` | EVE API key or pre-obtained access token |
 
 #### Example: calling EFFIS with your own CDSE credentials
 
@@ -411,7 +409,7 @@ When you deploy a server with custom headers to AgentCore, you must also configu
    DEFAULT_HEADER_ALLOWLIST: dict[str, list[str]] = {
        "effis": ["X-CDSE-Client-Id", "X-CDSE-Client-Secret"],
        "serpapi": ["X-API-Key"],
-       "eve_retrieval": ["X-EVE-Token", "X-EVE-Email", "X-EVE-Password"],
+       "eve_retrieval": ["X-EVE-Token"],
        # Add your server here:
        "my-server": ["X-My-Api-Key", "X-My-Api-Secret"],
    }

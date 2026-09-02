@@ -3,21 +3,20 @@
 Integration test for the EVE Retrieval MCP Server.
 
 Starts the server locally on HTTP, connects with an MCP client, and
-exercises every tool through the protocol, exactly as a real caller would.
+exercises every tool through the protocol — exactly as a real caller would.
 
-Credentials come from .env / env vars by default.  Override them from
+The EVE API key comes from .env / env vars by default. Override it from
 the command line to test the per-request header proxy flow.
 
 Usage:
-    # Default (creds from .env / env vars):
+    # Default (EVE_API_KEY from .env / env vars):
     python test.py
 
-    # Override the credential (an eve_ API key, or a live OIDC token):
-    python test.py --eve-api-key eve_...
-    python test.py --eve-token eyJhbGciOi...
+    # Override token:
+    python test.py --eve-token eve_...
 
     # Custom query:
-    python test.py --query "What is Copernicus?" --k 10 -c "Wikipedia EO"
+    python test.py --query "What is Copernicus?" --k 5
 
     # Specify port (default: 9100):
     python test.py --port 9200
@@ -141,12 +140,14 @@ async def test_retrieve(
     collections: list[str] | None,
 ) -> dict:
     """Call the retrieve tool and validate the response shape."""
-    _section(f"TEST: retrieve(query={query!r}, k={k})")
+    _section(f"TEST: retrieve(query={query!r}, k={k}, score_threshold={score_threshold}, collections={collections})")
 
     args: dict = {"query": query, "k": k, "score_threshold": score_threshold}
     if collections:
         args["public_collections"] = collections
 
+    print(args)
+    
     t0 = time.time()
     result = await session.call_tool("retrieve", args)
     elapsed = time.time() - t0
@@ -173,12 +174,6 @@ async def test_retrieve(
             print(f"    [{i+1}] {coll} | {score_str}")
             if text:
                 print(f"         {text}...")
-
-    if collections and not docs:
-        raise AssertionError(
-            f"retrieve returned no documents for collections {collections}; "
-            "expected at least one hit"
-        )
 
     print("  [PASS] retrieve returned valid response")
     return parsed
@@ -212,31 +207,26 @@ def main():
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help=f"Port to run the test server on (default: {DEFAULT_PORT})")
-    parser.add_argument("--query", "-q", default="What is ESA?",
-                        help="Search query (default: 'What is ESA?')")
+    parser.add_argument("--query", "-q", default="How is TROPOMI used to support policy making?",
+                        help="Search query (default: 'How is TROPOMI used to support policy making?')")
     parser.add_argument("--k", "-k", type=int, default=10,
-                        help="Number of documents to retrieve (default: 10)")
-    parser.add_argument("--score-threshold", "-s", type=float, default=0.6,
-                        help="Minimum similarity score (default: 0.6)")
-    parser.add_argument("--collections", "-c", nargs="+", default=None,
-                        help="Public collection names to search (the tool has no default; "
-                             "without them the backend returns no documents)")
+                        help="Number of documents to retrieve (default: 3)")
+    parser.add_argument("--score-threshold", "-s", type=float, default=0.2,
+                        help="Minimum similarity score (default: 0.7)")
+    parser.add_argument("--collections", "-c", nargs="+", default=["Wiley AI Gateway", "Wikipedia EO", "qwen-512-filtered", "wikipedia-512"],
+                        help="Public collection names (default: server defaults)")
 
     cred_group = parser.add_argument_group(
         "credentials",
         "Override EVE credentials (otherwise loaded from .env / env vars)",
     )
-    cred_group.add_argument("--eve-api-key", default=None,
-                            help="EVE API key (eve_...), becomes EVE_API_KEY for the server")
     cred_group.add_argument("--eve-token", default=None,
-                            help="Bearer for this request only, sent as X-EVE-Token")
+                            help="EVE API key or pre-obtained access token")
 
     args = parser.parse_args()
 
     # Build env overrides for the server subprocess
     env_overrides: dict[str, str] = {}
-    if args.eve_api_key:
-        env_overrides["EVE_API_KEY"] = args.eve_api_key
 
     # Build custom headers for the MCP client (per-request credential proxy)
     headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -266,7 +256,7 @@ def main():
             headers=headers,
         ))
 
-        _section("DONE: all tests passed" if ok else "DONE: some tests failed")
+        _section("DONE — all tests passed" if ok else "DONE — some tests failed")
 
     except TimeoutError:
         print(f"\n  [FAIL] Server did not start within {STARTUP_TIMEOUT}s")

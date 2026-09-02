@@ -25,7 +25,7 @@ import boto3
 DEFAULT_HEADER_ALLOWLIST: dict[str, list[str]] = {
     "effis": ["X-CDSE-Client-Id", "X-CDSE-Client-Secret"],
     "serpapi": ["X-API-Key"],
-    "eve_retrieval": ["X-EVE-Token", "X-EVE-Email", "X-EVE-Password"],
+    "eve_retrieval": ["X-EVE-Token"],
 }
 
 def _resolve_dockerfile(server_name: str) -> tuple[str, str]:
