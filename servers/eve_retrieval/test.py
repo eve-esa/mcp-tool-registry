@@ -12,8 +12,8 @@ Usage:
     # Default (creds from .env / env vars):
     python test.py
 
-    # Override credentials:
-    python test.py --eve-email user@example.com --eve-password secret
+    # Override the credential (an eve_ API key, or a live OIDC token):
+    python test.py --eve-api-key eve_...
     python test.py --eve-token eyJhbGciOi...
 
     # Custom query:
@@ -226,30 +226,22 @@ def main():
         "credentials",
         "Override EVE credentials (otherwise loaded from .env / env vars)",
     )
-    cred_group.add_argument("--eve-email", default=None,
-                            help="EVE account email")
-    cred_group.add_argument("--eve-password", default=None,
-                            help="EVE account password")
+    cred_group.add_argument("--eve-api-key", default=None,
+                            help="EVE API key (eve_...), becomes EVE_API_KEY for the server")
     cred_group.add_argument("--eve-token", default=None,
-                            help="Pre-obtained EVE Bearer token (skips login)")
+                            help="Bearer for this request only, sent as X-EVE-Token")
 
     args = parser.parse_args()
 
     # Build env overrides for the server subprocess
     env_overrides: dict[str, str] = {}
-    if args.eve_email:
-        env_overrides["EVE_EMAIL"] = args.eve_email
-    if args.eve_password:
-        env_overrides["EVE_PASSWORD"] = args.eve_password
+    if args.eve_api_key:
+        env_overrides["EVE_API_KEY"] = args.eve_api_key
 
     # Build custom headers for the MCP client (per-request credential proxy)
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if args.eve_token:
         headers["X-EVE-Token"] = args.eve_token
-    if args.eve_email:
-        headers["X-EVE-Email"] = args.eve_email
-    if args.eve_password:
-        headers["X-EVE-Password"] = args.eve_password
 
     # --- Start server, run tests, stop server ---
     _section("Starting EVE Retrieval MCP Server")
