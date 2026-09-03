@@ -112,7 +112,7 @@ async def retrieve(
     score_threshold: float = 0.7,
     max_new_tokens: int = 100000,
     public_collections: list[str] | None = None,
-    private_collection: str | None = None,
+    private_collections: list[str] | None = None,
 ) -> str:
     """Search EVE document collections and return retrieved documents.
 
@@ -133,7 +133,7 @@ async def retrieve(
         score_threshold: Minimum similarity score to keep a document (0.0–1.0).
         max_new_tokens: Token budget for rewrite generation (100–100000).
         public_collections: Public collection names to include in retrieval.
-        private_collection: Private collection name to include in retrieval.
+        private_collections: Private collection IDs to include in retrieval.
 
     Returns:
         JSON string containing retrieved_docs, latencies, original_query,
@@ -157,7 +157,7 @@ async def retrieve(
         "score_threshold": score_threshold,
         "max_new_tokens": max_new_tokens,
         "public_collections": public_collections,
-        "private_collection": private_collection,
+        "private_collections": private_collections,
     }
     if year is not None:
         body["year"] = year
