@@ -138,13 +138,20 @@ async def test_retrieve(
     k: int,
     score_threshold: float,
     collections: list[str] | None,
+    private_collection: str | None,
 ) -> dict:
     """Call the retrieve tool and validate the response shape."""
-    _section(f"TEST: retrieve(query={query!r}, k={k}, score_threshold={score_threshold}, collections={collections})")
+    _section(
+        "TEST: retrieve("
+        f"query={query!r}, k={k}, score_threshold={score_threshold}, "
+        f"collections={collections}, private_collection={private_collection})"
+    )
 
     args: dict = {"query": query, "k": k, "score_threshold": score_threshold}
     if collections:
         args["public_collections"] = collections
+    if private_collection:
+        args["private_collection"] = private_collection
 
     print(args)
     
@@ -185,7 +192,8 @@ async def test_retrieve(
 
 
 async def run_tests(port: int, query: str, k: int, score_threshold: float,
-                    collections: list[str] | None, headers: dict[str, str]) -> bool:
+                    collections: list[str] | None, private_collection: str | None,
+                    headers: dict[str, str]) -> bool:
     """Connect to the local server and run all tests."""
     mcp_url = f"http://localhost:{port}/mcp"
 
@@ -195,7 +203,7 @@ async def run_tests(port: int, query: str, k: int, score_threshold: float,
                 await session.initialize()
 
                 await test_list_tools(session)
-                await test_retrieve(session, query, k, score_threshold, collections)
+                await test_retrieve(session, query, k, score_threshold, collections, private_collection)
 
     return True
 
@@ -215,6 +223,8 @@ def main():
                         help="Minimum similarity score (default: 0.7)")
     parser.add_argument("--collections", "-c", nargs="+", default=["Wiley AI Gateway", "Wikipedia EO", "qwen-512-filtered", "wikipedia-512"],
                         help="Public collection names (default: server defaults)")
+    parser.add_argument("--private-collection", default=None,
+                        help="Private collection name")
 
     cred_group = parser.add_argument_group(
         "credentials",
@@ -253,6 +263,7 @@ def main():
             k=args.k,
             score_threshold=args.score_threshold,
             collections=args.collections,
+            private_collection=args.private_collection,
             headers=headers,
         ))
 
