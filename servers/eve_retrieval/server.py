@@ -157,7 +157,6 @@ async def retrieve(
         "score_threshold": score_threshold,
         "max_new_tokens": max_new_tokens,
         "public_collections": public_collections,
-        "private_collections": private_collections,
     }
     if year is not None:
         body["year"] = year
@@ -165,6 +164,8 @@ async def retrieve(
         body["filters"] = filters
     if llm_type is not None:
         body["llm_type"] = llm_type
+    if private_collections is not None:
+        body["private_collections"] = private_collections
 
     resp = await _authed_post("/retrieve", body)
 
