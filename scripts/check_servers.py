@@ -35,6 +35,15 @@ SMOKE_TESTS: dict[str, dict] = {
 }
 
 
+def _smoke_spec(name: str) -> dict | None:
+    """Return the smoke-test spec for a runtime, including eve_retrieval_* envs."""
+    if name in SMOKE_TESTS:
+        return SMOKE_TESTS[name]
+    if name.startswith("eve_retrieval"):
+        return SMOKE_TESTS["eve_retrieval"]
+    return None
+
+
 def _discover_runtimes(region: str) -> list[dict]:
     client = boto3.client("bedrock-agentcore-control", region_name=region)
     runtimes = []
@@ -143,10 +152,10 @@ async def _check_one(
                 tools_resp = await session.list_tools()
                 result["tools"] = [t.name for t in tools_resp.tools]
 
-                if skip_call or name not in SMOKE_TESTS:
+                spec = _smoke_spec(name)
+                if skip_call or spec is None:
                     result["smoke"] = "skipped"
                 else:
-                    spec = SMOKE_TESTS[name]
                     call_result = await session.call_tool(spec["tool"], spec["args"])
                     text = call_result.content[0].text
                     parsed = json.loads(text)
@@ -203,13 +212,13 @@ async def main(region: str, skip_call: bool) -> int:
         results.append(res)
         print(f"    Tools: {res['tools']}  |  Smoke: {res['smoke']}  |  {res['time']}")
 
-    print("\n" + "=" * 70)
-    print(f"{'Server':<20} {'Status':<10} {'Tools':<30} {'Smoke':<15} {'Time'}")
-    print("-" * 70)
+    print("\n" + "=" * 80)
+    print(f"{'Server':<28} {'Status':<10} {'Tools':<30} {'Smoke':<15} {'Time'}")
+    print("-" * 80)
     for r in results:
         tools_str = ", ".join(r["tools"]) if r["tools"] else "—"
-        print(f"{r['name']:<20} {r['status']:<10} {tools_str:<30} {r.get('smoke','—'):<15} {r.get('time','—')}")
-    print("=" * 70)
+        print(f"{r['name']:<28} {r['status']:<10} {tools_str:<30} {r.get('smoke','—'):<15} {r.get('time','—')}")
+    print("=" * 80)
 
     failures = [r for r in results if r.get("smoke") not in ("OK", "skipped")]
     if failures:

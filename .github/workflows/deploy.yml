@@ -39,6 +39,10 @@ jobs:
         id: detect
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.server }}" = "eve_retrieval" ]; then
+              echo "::error::eve_retrieval is deployed by .github/workflows/deploy-eve-retrieval.yml, not this workflow. Use that workflow (Run workflow) and pick an environment."
+              exit 1
+            fi
             SERVERS='["${{ github.event.inputs.server }}"]'
             echo "Manual trigger: deploying ${{ github.event.inputs.server }}"
           else

@@ -1,0 +1,156 @@
+name: Deploy eve_retrieval (multi-env)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "servers/eve_retrieval/**"
+      - "shared/**"
+      - "scripts/deploy_server.py"
+      - ".github/workflows/deploy-eve-retrieval.yml"
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment to deploy (or all)"
+        type: choice
+        options: [all, dev, staging, prod]
+        default: all
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  SERVER_NAME: eve_retrieval
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      envs: ${{ steps.set.outputs.envs }}
+    steps:
+      - name: Select target environments
+        id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.env }}" != "all" ] && [ -n "${{ github.event.inputs.env }}" ]; then
+            echo 'envs=["${{ github.event.inputs.env }}"]' >> "$GITHUB_OUTPUT"
+            echo "Manual trigger: deploying ${{ github.event.inputs.env }}"
+          else
+            echo 'envs=["dev","staging","prod"]' >> "$GITHUB_OUTPUT"
+            echo "Deploying all environments: dev, staging, prod"
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      image_uri: ${{ steps.build.outputs.image_uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install deploy dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-eve-tools-agentcore-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        id: build
+        run: |
+          python scripts/deploy_server.py \
+            --server-name "${{ env.SERVER_NAME }}" \
+            --skip-deploy \
+            --image-tag "${{ github.sha }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --account-id "${{ secrets.AWS_ACCOUNT_ID }}"
+
+  deploy:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJson(needs.setup.outputs.envs) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install deploy dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-eve-tools-agentcore-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve EVE API base URL
+        id: url
+        run: |
+          case "${{ matrix.env }}" in
+            dev)
+              echo "base_url=https://dev.eve-chat.chat/api" >> "$GITHUB_OUTPUT"
+              ;;
+            staging)
+              echo "base_url=https://staging.eve-chat.chat/api" >> "$GITHUB_OUTPUT"
+              ;;
+            prod)
+              echo "base_url=https://eve-chat.chat/api" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown environment: ${{ matrix.env }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Build AgentCore environment variables
+        env:
+          ALL_SECRETS: ${{ toJson(secrets) }}
+          EVE_ENV: ${{ matrix.env }}
+          EVE_API_BASE_URL: ${{ steps.url.outputs.base_url }}
+        run: |
+          python3 -c '
+          import json, os
+          secrets = json.loads(os.environ["ALL_SECRETS"])
+          env_name = os.environ["EVE_ENV"].upper()
+          payload = {"EVE_API_BASE_URL": os.environ["EVE_API_BASE_URL"]}
+          key_name = f"EVE_API_KEY_{env_name}"
+          key = secrets.get(key_name, "")
+          if key:
+              payload["EVE_API_KEY"] = key
+              print(f"Including EVE_API_KEY from {key_name}")
+          else:
+              print(f"No {key_name} secret — token-only (X-EVE-Token)")
+          path = os.path.join(os.environ["RUNNER_TEMP"], "agentcore-env.json")
+          with open(path, "w", encoding="utf-8") as fh:
+              json.dump(payload, fh)
+          print(f"Wrote {path}")
+          '
+
+      - name: Deploy eve_retrieval_${{ matrix.env }}
+        run: |
+          python scripts/deploy_server.py \
+            --server-name "${{ env.SERVER_NAME }}" \
+            --runtime-name "eve_retrieval_${{ matrix.env }}" \
+            --image-uri "${{ needs.build.outputs.image_uri }}" \
+            --environment-variables "@${RUNNER_TEMP}/agentcore-env.json" \
+            --region "${{ env.AWS_REGION }}" \
+            --account-id "${{ secrets.AWS_ACCOUNT_ID }}" \
+            --execution-role-arn "${{ secrets.AGENTCORE_EXECUTION_ROLE_ARN }}" \
+            --cognito-discovery-url "${{ secrets.COGNITO_DISCOVERY_URL }}" \
+            --cognito-client-id "${{ secrets.COGNITO_CLIENT_ID }}"

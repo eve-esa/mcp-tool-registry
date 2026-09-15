@@ -6,6 +6,11 @@ whose files were modified.
 
 Usage:
     python scripts/detect_changed.py [--base-ref HEAD~1]
+    python scripts/detect_changed.py --all
+    python scripts/detect_changed.py --include-excluded
+
+Servers in ``GENERIC_DEPLOY_EXCLUDE`` are omitted by default. Pass
+``--include-excluded`` to include them.
 
 Outputs JSON to stdout:  ["effis", "ticket-manager"]
 """
@@ -14,6 +19,9 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+
+# Servers with a dedicated workflow; omitted from the generic deploy.yml matrix.
+GENERIC_DEPLOY_EXCLUDE = frozenset({"eve_retrieval"})
 
 
 def get_changed_files(base_ref: str = "HEAD~1") -> list[str]:
@@ -58,6 +66,9 @@ def main():
             base_ref = sys.argv[2]
         changed_files = get_changed_files(base_ref)
         servers = extract_server_names(changed_files)
+
+    if "--include-excluded" not in sys.argv:
+        servers = [s for s in servers if s not in GENERIC_DEPLOY_EXCLUDE]
 
     print(json.dumps(servers))
 

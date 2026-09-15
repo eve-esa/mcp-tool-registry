@@ -2,7 +2,7 @@
 EVE Retrieval MCP Server
 ========================
 An MCP server that proxies document retrieval requests to the EVE
-dev API (https://dev.eve-chat.chat/api).
+API (``EVE_API_BASE_URL``).
 
 Authenticates with an EVE API key or pre-obtained access token and forwards
 queries to the ``POST /retrieve`` endpoint, returning the raw retrieval results
@@ -46,7 +46,8 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
 
 EVE_API_KEY = os.getenv("EVE_API_KEY", "")
-EVE_API_BASE_URL = os.getenv("EVE_API_BASE_URL", "https://dev.eve-chat.chat/api")
+EVE_API_BASE_URL = os.getenv("EVE_API_BASE_URL", "https://eve-chat.chat/api")
+log.info("EVE_API_BASE_URL=%s", EVE_API_BASE_URL)
 
 _HTTP_TIMEOUT = 120.0
 
@@ -140,14 +141,7 @@ async def retrieve(
         and requery (the rewritten query used for retrieval).
     """
     if _resolve_eve_token() is None:
-        return json.dumps(
-            {
-                "error": (
-                    "EVE token not set. Send X-EVE-Token or set EVE_API_KEY "
-                    "to an eve_ API key."
-                )
-            }
-        )
+        return json.dumps({"error": ("EVE token not set. Send X-EVE-Token or set EVE_API_KEY to an eve_ API key.")})
 
     body: dict[str, Any] = {
         "query": query,
