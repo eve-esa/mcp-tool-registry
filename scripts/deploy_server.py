@@ -299,6 +299,8 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.image_uri is not None and not args.image_uri.strip():
+        parser.error("--image-uri must not be empty")
     if args.skip_deploy and args.image_uri:
         parser.error("--skip-deploy and --image-uri cannot be used together")
     if not args.skip_deploy and not args.execution_role_arn:
@@ -328,7 +330,7 @@ def main():
         image_uri = build_and_push_image(
             args.server_name, args.account_id, args.region, args.image_tag
         )
-        _write_github_output(image_uri=image_uri)
+        _write_github_output(image_tag=args.image_tag)
 
     if args.skip_deploy:
         print(f"\n  Built image: {image_uri}")

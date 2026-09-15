@@ -44,8 +44,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     environment: production
-    outputs:
-      image_uri: ${{ steps.build.outputs.image_uri }}
     steps:
       - uses: actions/checkout@v4
 
@@ -142,12 +140,16 @@ jobs:
           print(f"Wrote {path}")
           '
 
+      # Reconstruct the URI here. Passing the full ECR URI as a job output is
+      # stripped by GitHub Actions because it contains AWS_ACCOUNT_ID.
       - name: Deploy eve_retrieval_${{ matrix.env }}
+        env:
+          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/mcp-servers/${{ env.SERVER_NAME }}:${{ github.sha }}
         run: |
           python scripts/deploy_server.py \
             --server-name "${{ env.SERVER_NAME }}" \
             --runtime-name "eve_retrieval_${{ matrix.env }}" \
-            --image-uri "${{ needs.build.outputs.image_uri }}" \
+            --image-uri "$IMAGE_URI" \
             --environment-variables "@${RUNNER_TEMP}/agentcore-env.json" \
             --region "${{ env.AWS_REGION }}" \
             --account-id "${{ secrets.AWS_ACCOUNT_ID }}" \
