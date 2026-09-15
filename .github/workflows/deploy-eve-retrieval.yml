@@ -118,17 +118,18 @@ jobs:
 
       - name: Build AgentCore environment variables
         env:
-          ALL_SECRETS: ${{ toJson(secrets) }}
           EVE_ENV: ${{ matrix.env }}
           EVE_API_BASE_URL: ${{ steps.url.outputs.base_url }}
+          EVE_API_KEY_DEV: ${{ secrets.EVE_API_KEY_DEV }}
+          EVE_API_KEY_STAGING: ${{ secrets.EVE_API_KEY_STAGING }}
+          EVE_API_KEY_PROD: ${{ secrets.EVE_API_KEY_PROD }}
         run: |
           python3 -c '
           import json, os
-          secrets = json.loads(os.environ["ALL_SECRETS"])
           env_name = os.environ["EVE_ENV"].upper()
           payload = {"EVE_API_BASE_URL": os.environ["EVE_API_BASE_URL"]}
           key_name = f"EVE_API_KEY_{env_name}"
-          key = secrets.get(key_name, "")
+          key = os.environ.get(key_name, "")
           if key:
               payload["EVE_API_KEY"] = key
               print(f"Including EVE_API_KEY from {key_name}")
