@@ -25,10 +25,9 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any
-import httpx
-from typing import Literal
+from typing import Any, Literal
 
+import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
