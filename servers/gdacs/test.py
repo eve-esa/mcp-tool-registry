@@ -3,8 +3,7 @@
 Integration test for the Disasters (GDACS) MCP Server.
 
 Starts the server locally on HTTP, connects with an MCP client, and
-exercises the search_gdacs_events tool through the protocol — exactly
-as a real caller would. No credentials required (GDACS is a free,
+exercises the search_gdacs_events tool through the protocol. No credentials required (GDACS is a free,
 public API).
 
 Usage:
@@ -139,7 +138,9 @@ async def test_search_all_events(session: ClientSession) -> dict:
         return parsed
 
     features = parsed.get("features", [])
-    assert isinstance(features, list) and len(features) > 0, "Expected at least one event"
+    assert (
+        isinstance(features, list) and len(features) > 0
+    ), "Expected at least one event"
     print(f"\n  Elapsed:  {elapsed:.1f}s")
     print(f"  events:   {len(features)}")
     print("  [PASS] search_gdacs_events returned events")
@@ -157,7 +158,7 @@ async def test_search_filtered(session: ClientSession) -> dict:
     assert parsed is not None, "Failed to parse response"
 
     if "error" in parsed:
-        # No current earthquakes is a valid (if unlikely) outcome; only fail on real errors
+        # No current earthquakes is a valid (but unlikely) outcome, only fail on real errors
         print(f"\n  [INFO] {parsed['error'][:200]}")
         return parsed
 
@@ -181,7 +182,11 @@ async def run_tests(port: int) -> None:
     mcp_url = f"http://localhost:{port}/mcp"
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(TOOL_TIMEOUT)) as http:
-        async with streamable_http_client(mcp_url, http_client=http) as (read, write, _):
+        async with streamable_http_client(mcp_url, http_client=http) as (
+            read,
+            write,
+            _,
+        ):
             async with ClientSession(read, write) as session:
                 await session.initialize()
 
@@ -191,9 +196,15 @@ async def run_tests(port: int) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Integration test for the Disasters (GDACS) MCP Server")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
-                        help=f"Port to run the test server on (default: {DEFAULT_PORT})")
+    parser = argparse.ArgumentParser(
+        description="Integration test for the Disasters (GDACS) MCP Server"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"Port to run the test server on (default: {DEFAULT_PORT})",
+    )
     args = parser.parse_args()
 
     _section("Starting Disasters (GDACS) MCP Server")

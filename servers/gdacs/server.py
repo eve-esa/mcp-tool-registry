@@ -1,10 +1,15 @@
 """
-GDACS — MCP Server
-======================
-Brief description of what this server does.
+GDACS (Disasters) MCP Server
+============================
+An MCP server providing global natural disaster and hazard monitoring
+via GDACS (Global Disaster Alert and Coordination System), a joint
+initiative of the UN and European Commission. Use to search for
+natural disaster events worldwide covering earthquakes, floods,
+volcanoes, wildfires, droughts, cyclones and tsunamis.
 
 Tools:
-    my_tool — description of the tool
+    search_gdacs_events — search ongoing/recent disasters by hazard
+                        type, alert level, and/or country
 
 Usage:
     python server.py                              # stdio transport
@@ -111,7 +116,7 @@ async def search_gdacs_events(
         return json.dumps({"error": f"Disaster search failed: {exc}"})
 
     if not results.get("features"):
-        return json.dumps({"error": f"No results found for query."})
+        return json.dumps({"error": "No results found for query."})
 
     return json.dumps(results)
 
