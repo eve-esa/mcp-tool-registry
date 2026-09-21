@@ -7,7 +7,7 @@ from trallie.schema_generation.schema_generator import SchemaGenerator
 load_dotenv()
 
 DEFAULT_PROVIDER = "groq"
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-20b"
 
 mcp = FastMCP("Trallie MCP", host="0.0.0.0", port=8000, stateless_http=True)
 
