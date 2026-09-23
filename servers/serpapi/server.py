@@ -94,9 +94,13 @@ async def search_google(
         async with httpx.AsyncClient(timeout=SERP_HTTP_TIMEOUT) as client:
             resp = await client.get(SERPAPI_URL, params=params)
             resp.raise_for_status()
-    except Exception as e:
-        logger.warning("SerpAPI request failed: %s", e)
-        return json.dumps({"error": f"Request failed: {e}"})
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        logger.warning("SerpAPI returned HTTP %s", status)
+        return json.dumps({"error": f"SerpAPI returned HTTP {status}"})
+    except httpx.HTTPError as e:
+        logger.warning("SerpAPI request failed: %s", type(e).__name__)
+        return json.dumps({"error": f"SerpAPI request failed ({type(e).__name__})"})
 
     results = [
         {
