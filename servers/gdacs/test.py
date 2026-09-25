@@ -148,7 +148,7 @@ async def test_search_all_events(session: ClientSession) -> dict:
 
 
 async def test_search_filtered(session: ClientSession) -> dict:
-    """Test search_gdacs_events filtered to earthquakes."""
+    """Test search_gdacs_events filtered to earthquakes (EQ)."""
     _section("TEST: search_gdacs_events(eventlist='EQ')")
 
     t0 = time.time()
@@ -158,7 +158,7 @@ async def test_search_filtered(session: ClientSession) -> dict:
     assert parsed is not None, "Failed to parse response"
 
     if "error" in parsed:
-        # No current earthquakes is a valid (but unlikely) outcome, only fail on real errors
+        # No current earthquakes is a valid outcome, will only fail on real errors
         print(f"\n  [INFO] {parsed['error'][:200]}")
         return parsed
 
