@@ -11,7 +11,7 @@ An MCP server providing European wildfire detection tools via:
 Tools:
     geocode_place           — convert a place name to a bounding box
     get_effis_burnt_areas   — burnt area fires with bboxes
-    compute_metrics         — NDVI & BAIS2 time series around a fire event
+    compute_metrics         — burn-masked NDVI, NBR, BAIS2 series and VRR
 
 Usage:
     python server.py                              # stdio transport
@@ -27,20 +27,30 @@ Environment (optional ``effis/.env`` — loaded automatically):
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import io
 import json
 import logging
+import math
 import os
+import re as _re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    import numpy as np
+from typing import Any
 
 import httpx
+import matplotlib
+import numpy as np
+import pandas as pd
+import tifffile
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from PIL import Image as PILImage
+
+# Headless server: select Agg before any pyplot import (matplotlib.use docs).
+matplotlib.use("Agg")
 
 # ---------------------------------------------------------------------------
 # Load .env (same directory as this file) before reading configuration
@@ -77,9 +87,6 @@ CDSE_PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
 
 # CDSE Sentinel Hub Catalog (STAC search for scene metadata)
 CDSE_CATALOG_URL = "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search"
-
-# CDSE Sentinel Hub Statistical API (server-side pixel statistics)
-CDSE_STATS_URL = "https://sh.dataspace.copernicus.eu/api/v1/statistics"
 
 # Local EFFIS shapefile cache (for fast historical date queries).
 # Download from: https://maps.effis.emergency.copernicus.eu/effis?service=WFS&request=getfeature&typename=ms:modis.ba.poly&version=1.1.0&outputformat=SHAPEZIP
@@ -171,6 +178,126 @@ def _add_months(dt: datetime, months: int) -> datetime:
 # Default directory for saving downloaded map images
 # Use /tmp in cloud runtimes (ephemeral but always writable)
 DEFAULT_SAVE_DIR = Path(os.getenv("DEFAULT_SAVE_DIR", "/tmp/fire_maps"))
+
+
+def _tool_error(error_type: str, error: str, **extra) -> str:
+    """JSON domain-error payload (successful tool content, not an MCP isError)."""
+    payload = {"ok": False, "error_type": error_type, "error": error}
+    payload.update(extra)
+    return json.dumps(payload)
+
+
+# Axis-aligned lon/lat width scales with cos(latitude); warn above this.
+_BBOX_HIGH_LAT = 70.0
+_BBOX_VALIDITY = (
+    "Geodesic envelopes are valid away from the poles and, unless "
+    "antimeridian-split, away from ±180°."
+)
+
+
+def _split_antimeridian_bbox(west, south, east, north):
+    """If west > east after wrap, cut at ±180 (RFC 7946 §3.1.9)."""
+    if west > east:
+        return [
+            (west, south, 180.0, north),
+            (-180.0, south, east, north),
+        ]
+    return [(west, south, east, north)]
+
+
+def _bbox_record(boxes):
+    """JSON fields for one bbox, or two when split at the antimeridian."""
+    west, south, east, north = boxes[0]
+    rec = {
+        "bbox": f"{west:.4f},{south:.4f},{east:.4f},{north:.4f}",
+        "bbox_array": [
+            round(west, 4), round(south, 4), round(east, 4), round(north, 4),
+        ],
+    }
+    notes = []
+    if len(boxes) > 1:
+        rec["bboxes"] = [
+            f"{w:.4f},{s:.4f},{e:.4f},{n:.4f}" for w, s, e, n in boxes
+        ]
+        rec["bbox_arrays"] = [
+            [round(w, 4), round(s, 4), round(e, 4), round(n, 4)]
+            for w, s, e, n in boxes
+        ]
+        rec["antimeridian_split"] = True
+        notes.append(
+            "Antimeridian split: pass each entry in bboxes to downstream tools."
+        )
+    if max(abs(south), abs(north)) >= _BBOX_HIGH_LAT:
+        notes.append(
+            "High-latitude envelope: axis-aligned lon/lat boxes distort "
+            "physical size as meridians converge (width ∝ cos(latitude)). "
+            "Wildfires are uncommon near the poles."
+        )
+    if notes:
+        notes.append(_BBOX_VALIDITY)
+        rec["warning"] = " ".join(notes)
+        logger.warning("%s", rec["warning"])
+    return rec
+
+
+def _expand_bbox_km(west, south, east, north, buffer_km):
+    """Push each side of a WGS84 bbox outward by buffer_km.
+
+    Returns a list of one bbox, or two if the envelope crosses the
+    antimeridian. Callers must use every box.
+
+    Geod.fwd walks from a point (Karney 2013;
+    https://pyproj4.github.io/pyproj/stable/api/geod.html) and normalizes
+    longitude to [-180, 180].
+
+    North/south: walk from (west, north) / (west, south). Which longitude
+    we use does not change the new latitude.
+
+    East/west: a kilometre is a different Δlon at south than at north, so
+    there is no single latitude to pick. Walk both corners, unwrap any
+    ±180° jump, then keep the outer longitude (axis-aligned envelope).
+    Then both east corners (and both west corners) are at least buffer_km
+    out.
+
+    If that envelope inverts (west > east), split into [west, 180] and
+    [-180, east] rather than min/max, which would be an invalid box or a
+    ~360° strip (RFC 7946 §3.1.9).
+
+    Valid away from the poles and, unless antimeridian-split, away from
+    ±180°. At high latitudes an axis-aligned lon/lat envelope distorts
+    physical width because meridians converge (Snyder 1987;
+    RFC 7946 §5.3).
+    """
+    if buffer_km <= 0:
+        return _split_antimeridian_bbox(west, south, east, north)
+    from pyproj import Geod
+    geod = Geod(ellps="WGS84")
+    dist_m = buffer_km * 1000.0
+    _, north_lat, _ = geod.fwd(west, north, 0, dist_m)
+    _, south_lat, _ = geod.fwd(west, south, 180, dist_m)
+    east_south, _, _ = geod.fwd(east, south, 90, dist_m)
+    east_north, _, _ = geod.fwd(east, north, 90, dist_m)
+    west_south, _, _ = geod.fwd(west, south, 270, dist_m)
+    west_north, _, _ = geod.fwd(west, north, 270, dist_m)
+
+    def _unwrap_east(lon0, lon1):
+        return lon1 + 360.0 if (lon1 - lon0) < -180.0 else lon1
+
+    def _unwrap_west(lon0, lon1):
+        return lon1 - 360.0 if (lon1 - lon0) > 180.0 else lon1
+
+    east_u = max(_unwrap_east(east, east_south), _unwrap_east(east, east_north))
+    west_u = min(_unwrap_west(west, west_south), _unwrap_west(west, west_north))
+    east_lon = east_u - 360.0 if east_u > 180.0 else east_u
+    west_lon = west_u + 360.0 if west_u < -180.0 else west_u
+    south_lat = max(-90.0, min(90.0, south_lat))
+    north_lat = max(-90.0, min(90.0, north_lat))
+    return _split_antimeridian_bbox(west_lon, south_lat, east_lon, north_lat)
+
+
+def _bbox_hash8(bbox: str, extra: str = "") -> str:
+    return hashlib.sha1(f"{bbox}|{extra}".encode()).hexdigest()[:8]
+
 
 
 def _read_burnt_areas_from_shapefile(
@@ -437,11 +564,16 @@ async def geocode_place(
         place_name: Name of the place to geocode (e.g. "Greece",
                     "Athens", "Evia island", "Peloponnese").
         buffer_km:  Optional buffer in km to expand the bbox (default 0).
+                    Expanded with a WGS84 geodesic (pyproj Geod.fwd), not a
+                    fixed degrees-per-km approximation. A buffer that crosses
+                    ±180° is split into two boxes.
         limit:      Maximum number of candidate results to return (default 5).
 
     Returns:
         JSON with the top result's bbox string (ready to pass to other tools)
-        and all candidate matches.
+        and all candidate matches. If a geodesic buffer crosses the
+        antimeridian, the result includes ``bboxes`` (both halves) and
+        ``antimeridian_split``.
     """
     logger.info("Geocoding place: %s", place_name)
 
@@ -468,32 +600,21 @@ async def geocode_place(
             }
         )
 
-    buf = buffer_km / 111.0
-
     def _parse_result(r: dict) -> dict:
         # Nominatim boundingbox is [south, north, west, east]
         bb = r.get("boundingbox", [])
-        south, north, west, east = (
-            float(bb[0]) - buf,
-            float(bb[1]) + buf,
-            float(bb[2]) - buf,
-            float(bb[3]) + buf,
-        )
-        return {
+        rec = _bbox_record(_expand_bbox_km(
+            float(bb[2]), float(bb[0]), float(bb[3]), float(bb[1]), buffer_km,
+        ))
+        rec.update({
             "display_name": r.get("display_name", ""),
-            "bbox": f"{west:.4f},{south:.4f},{east:.4f},{north:.4f}",
-            "bbox_array": [
-                round(west, 4),
-                round(south, 4),
-                round(east, 4),
-                round(north, 4),
-            ],
             "lat": float(r.get("lat", 0)),
             "lon": float(r.get("lon", 0)),
             "osm_type": r.get("osm_type", ""),
             "class": r.get("class", ""),
             "type": r.get("type", ""),
-        }
+        })
+        return rec
 
     parsed = [_parse_result(r) for r in results]
 
@@ -549,7 +670,9 @@ async def get_effis_burnt_areas(
                         - "2023"        → fires on that specific year
                         - None          → full fire season (default)
         buffer_km:      Buffer around each fire polygon in km (default 5).
-                        Applied when computing per-fire bounding boxes.
+                        Applied with a WGS84 geodesic when computing per-fire
+                        bounding boxes. A buffer that crosses ±180° is split
+                        into two boxes.
         save_dir:       Directory to save files. Defaults to ~/fire_maps/.
         shapefile_dir:  Path to local EFFIS shapefile directory (containing
                         modis.ba.poly.shp). Overrides EFFIS_SHAPEFILE_DIR env var.
@@ -557,7 +680,9 @@ async def get_effis_burnt_areas(
 
     Returns:
         JSON with a list of fires (bbox, area_ha, commune, country,
-        firedate), saved file paths, and WMS map image info.
+        firedate), saved file paths, and WMS map image info. Fires that
+        cross the antimeridian also include ``bboxes`` and
+        ``antimeridian_split``.
     """
 
     # Resolve date shortcuts and build WFS params
@@ -752,7 +877,7 @@ async def get_effis_burnt_areas(
         # of the tool response that the model sees).
         out_dir = Path(save_dir) if save_dir else DEFAULT_SAVE_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
-        filepath = out_dir / f"burnt_areas_{date_label}.geojson"
+        filepath = out_dir / f"burnt_areas_{date_label}_{_bbox_hash8(bbox, str(max_features))}.geojson"
         filepath.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
 
         result["total_features"] = n_features
@@ -760,7 +885,6 @@ async def get_effis_burnt_areas(
 
         # Extract per-fire bounding boxes with metadata (sorted by area,
         # largest first). Each bbox is ready to pass to compute_metrics.
-        buf = buffer_km / 111.0  # ~1 degree ≈ 111 km
         fires = []
         for feat in features:
             props = feat.get("properties", {})
@@ -786,21 +910,17 @@ async def get_effis_burnt_areas(
             if not all_lons:
                 continue
 
-            west = min(all_lons) - buf
-            south = min(all_lats) - buf
-            east = max(all_lons) + buf
-            north = max(all_lats) + buf
-
-            fires.append(
-                {
-                    "bbox": f"{west:.4f},{south:.4f},{east:.4f},{north:.4f}",
-                    "bbox_array": [round(west, 4), round(south, 4), round(east, 4), round(north, 4)],
-                    "area_ha": area_ha,
-                    "commune": props.get("COMMUNE", props.get("PROVINCE", "")),
-                    "country": props.get("COUNTRY", ""),
-                    "firedate": props.get("FIREDATE", ""),
-                }
-            )
+            rec = _bbox_record(_expand_bbox_km(
+                min(all_lons), min(all_lats), max(all_lons), max(all_lats),
+                buffer_km,
+            ))
+            rec.update({
+                "area_ha": area_ha,
+                "commune": props.get("COMMUNE", props.get("PROVINCE", "")),
+                "country": props.get("COUNTRY", ""),
+                "firedate": props.get("FIREDATE", ""),
+            })
+            fires.append(rec)
 
         fires.sort(key=lambda f: f["area_ha"], reverse=True)
         result["buffer_km"] = buffer_km
@@ -893,101 +1013,89 @@ async def _cdse_catalog_search(
 
 
 # ===== Tool 2: Compute Vegetation & Burn Metrics ============================
+# Notebook pipeline: SCL classes 1/3/8/9/10/11 invalid (CDSE "Masking Out
+# Cloudy Pixels", extended with defective and snow; class 2 dark-area kept),
+# shared UTM Process API grid, AOI coverage pre-screen, median NDVI
+# disturbance for VRR (Lin et al. 2005,
+# https://doi.org/10.1016/j.foreco.2005.02.026; median compositing per
+# Asam et al. 2023, https://doi.org/10.3390/rs15061631).
 
-# Evalscripts for the Sentinel Hub Statistical API.
-# Each computes one or both spectral indices per pixel; the Statistical API
-# aggregates results into min/max/mean/stDev/percentiles over the area.
-#
-# NDVI (Normalized Difference Vegetation Index):
-#   (B08 − B04) / (B08 + B04)
-#   Bands: B04 (Red, 10 m), B08 (NIR, 10 m)
-#   Healthy veg ≈ 0.6–0.9, bare soil ≈ 0.1, burnt ≈ −0.1–0.2
-#
-# BAIS2 (Burned Area Index for Sentinel-2):
-#   (1 − √(B06·B07·B8A / B04)) × ((B12 − B8A) / √(B12 + B8A) + 1)
-#   Bands: B04 (10 m), B06 (20 m), B07 (20 m), B8A (20 m), B12 (20 m)
-#   Burn scars ≈ −1 to 1, active fires ≈ 1 to 6
-#   Filipponi (2018), DOI: 10.3390/ecrs-2-05177
+# ── Evalscripts and Process API helpers (SCL-aware, UTM grid) ──
 
-_METRICS_EVALSCRIPTS: dict[str, str] = {
-    "ndvi": """//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["B04", "B08", "dataMask"] }],
-    output: [
-      { id: "ndvi", bands: 1, sampleType: "FLOAT32" },
-      { id: "dataMask", bands: 1 }
-    ]
-  };
-}
-function evaluatePixel(sample) {
-  var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-10);
-  return { ndvi: [ndvi], dataMask: [sample.dataMask] };
-}""",
-    "bais2": """//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["B04", "B06", "B07", "B8A", "B12", "dataMask"] }],
-    output: [
-      { id: "bais2", bands: 1, sampleType: "FLOAT32" },
-      { id: "dataMask", bands: 1 }
-    ]
-  };
-}
-function evaluatePixel(sample) {
-  var ratio = Math.max(0, (sample.B06 * sample.B07 * sample.B8A) / (sample.B04 + 1e-10));
-  var swirSum = Math.max(0, sample.B12 + sample.B8A);
-  var bais2 = (1 - Math.sqrt(ratio)) *
-              ((sample.B12 - sample.B8A) / (Math.sqrt(swirSum) + 1e-10) + 1);
-  return { bais2: [bais2], dataMask: [sample.dataMask] };
-}""",
-    "nbr": """//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["B08", "B12", "dataMask"] }],
-    output: [
-      { id: "nbr", bands: 1, sampleType: "FLOAT32" },
-      { id: "dataMask", bands: 1 }
-    ]
-  };
-}
-function evaluatePixel(sample) {
-  var nbr = (sample.B08 - sample.B12) / (sample.B08 + sample.B12 + 1e-10);
-  return { nbr: [nbr], dataMask: [sample.dataMask] };
-}""",
-    "ndvi_bais2": """//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["B04", "B06", "B07", "B08", "B8A", "B12", "dataMask"] }],
-    output: [
-      { id: "ndvi", bands: 1, sampleType: "FLOAT32" },
-      { id: "bais2", bands: 1, sampleType: "FLOAT32" },
-      { id: "dataMask", bands: 1 }
-    ]
-  };
-}
-function evaluatePixel(sample) {
-  var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-10);
-  var ratio = Math.max(0, (sample.B06 * sample.B07 * sample.B8A) / (sample.B04 + 1e-10));
-  var swirSum = Math.max(0, sample.B12 + sample.B8A);
-  var bais2 = (1 - Math.sqrt(ratio)) *
-              ((sample.B12 - sample.B8A) / (Math.sqrt(swirSum) + 1e-10) + 1);
-  return { ndvi: [ndvi], bais2: [bais2], dataMask: [sample.dataMask] };
-}""",
-}
+# FIREMON unburned-vs-burned line (Key & Benson 2006), not a severity class.
+# https://doi.org/10.2737/rmrs-gtr-164
+BURN_THRESHOLD_DEFAULT = 0.10
+PROCESS_MAX_PX = 2500
+# Invalid inside the AOI: 1 saturated/defective, 3 cloud shadow, 8/9 cloud
+# medium/high probability, 10 thin cirrus, 11 snow/ice (Sen2Cor SCL).
+# CDSE "Masking Out Cloudy Pixels" drops cloud classes 8–10
+# (https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Evalscript/Examples.html).
+# This set also drops defective pixels and snow/ice, and keeps class 2
+# ("dark area") because burned pixels can be dark.
+_SCL_INVALID = (1, 3, 8, 9, 10, 11)
+
+
+def _process_grid(bbox, resolution_m, width, height):
+    """Shared Process API bounds + size so every download uses the same grid.
+
+    When resolution_m > 0, request a local UTM CRS with resx/resy in metres
+    (not width/height). Clamp so neither side exceeds 2500 px.
+    """
+    west, south, east, north = [float(x) for x in bbox]
+    if resolution_m and int(resolution_m) > 0:
+        from pyproj import Transformer
+        lon_c = (west + east) / 2.0
+        lat_c = (south + north) / 2.0
+        zone = int((lon_c + 180.0) / 6.0) + 1
+        zone = min(max(zone, 1), 60)
+        epsg_code = (32600 if lat_c >= 0 else 32700) + zone
+        transformer = Transformer.from_crs(
+            "EPSG:4326", f"EPSG:{epsg_code}", always_xy=True,
+        )
+        x0, y0 = transformer.transform(west, south)
+        x1, y1 = transformer.transform(east, north)
+        xmin, xmax = min(x0, x1), max(x0, x1)
+        ymin, ymax = min(y0, y1), max(y0, y1)
+        res = float(resolution_m)
+        nx = max((xmax - xmin) / res, 1.0)
+        ny = max((ymax - ymin) / res, 1.0)
+        if nx > PROCESS_MAX_PX or ny > PROCESS_MAX_PX:
+            res = max(
+                (xmax - xmin) / PROCESS_MAX_PX,
+                (ymax - ymin) / PROCESS_MAX_PX,
+            )
+        crs_url = f"http://www.opengis.net/def/crs/EPSG/0/{epsg_code}"
+        bounds = {
+            "bbox": [xmin, ymin, xmax, ymax],
+            "properties": {"crs": crs_url},
+        }
+        size = {"resx": res, "resy": res}
+        meta = {
+            "crs": f"EPSG:{epsg_code}",
+            "actual_resolution_m": round(res, 4),
+        }
+        return bounds, size, meta
+    bounds = {
+        "bbox": [west, south, east, north],
+        "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
+    }
+    size = {"width": int(width), "height": int(height)}
+    meta = {"crs": "EPSG:4326", "actual_resolution_m": None}
+    return bounds, size, meta
+
 
 # Visualization evalscripts — produce colorized PNG images of each index
-# via the Process API (separate from the Statistical API evalscripts above).
+# via the Process API.
 _METRIC_VIS_EVALSCRIPTS: dict[str, str] = {
     "ndvi": """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B08", "dataMask"] }],
+    input: [{ bands: ["B04", "B08", "SCL", "dataMask"] }],
     output: { bands: 3, sampleType: "AUTO" }
   };
 }
 function evaluatePixel(sample) {
-  if (!sample.dataMask) return [0, 0, 0];
+  if (!sample.dataMask || sample.SCL === 1 || sample.SCL === 3 || sample.SCL === 8 || sample.SCL === 9 || sample.SCL === 10 || sample.SCL === 11) return [0, 0, 0];
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-10);
   return colorBlend(ndvi,
     [-0.2, 0, 0.1, 0.2, 0.35, 0.5, 0.65, 0.9],
@@ -997,12 +1105,12 @@ function evaluatePixel(sample) {
     "bais2": """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B06", "B07", "B8A", "B12", "dataMask"] }],
+    input: [{ bands: ["B04", "B06", "B07", "B8A", "B12", "SCL", "dataMask"] }],
     output: { bands: 3, sampleType: "AUTO" }
   };
 }
 function evaluatePixel(sample) {
-  if (!sample.dataMask) return [0, 0, 0];
+  if (!sample.dataMask || sample.SCL === 1 || sample.SCL === 3 || sample.SCL === 8 || sample.SCL === 9 || sample.SCL === 10 || sample.SCL === 11) return [0, 0, 0];
   var ratio = Math.max(0, (sample.B06 * sample.B07 * sample.B8A) / (sample.B04 + 1e-10));
   var swirSum = Math.max(0, sample.B12 + sample.B8A);
   var bais2 = (1 - Math.sqrt(ratio)) *
@@ -1012,15 +1120,16 @@ function evaluatePixel(sample) {
     [[0,0,0.5], [0,0.3,0.8], [0.95,0.95,0.1], [0.9,0.5,0.1],
      [0.8,0.2,0.1], [0.6,0,0], [0.8,0,0.8]]);
 }""",
+
     "nbr": """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B08", "B12", "dataMask"] }],
+    input: [{ bands: ["B08", "B12", "SCL", "dataMask"] }],
     output: { bands: 3, sampleType: "AUTO" }
   };
 }
 function evaluatePixel(sample) {
-  if (!sample.dataMask) return [0, 0, 0];
+  if (!sample.dataMask || sample.SCL === 1 || sample.SCL === 3 || sample.SCL === 8 || sample.SCL === 9 || sample.SCL === 10 || sample.SCL === 11) return [0, 0, 0];
   var nbr = (sample.B08 - sample.B12) / (sample.B08 + sample.B12 + 1e-10);
   return colorBlend(nbr,
     [-0.5, -0.2, 0, 0.2, 0.4, 0.6, 0.8],
@@ -1036,9 +1145,15 @@ function evaluatePixel(sample) {
 _COMPOSITE_NDVI_EVALSCRIPT = """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B08", "dataMask"], mosaicking: "ORBIT" }],
+    input: [{ bands: ["B04", "B08", "SCL", "dataMask"], mosaicking: "ORBIT" }],
     output: [{ id: "default", bands: 1, sampleType: "FLOAT32" }]
   };
+}
+function sclOk(s) {
+  if (!s.dataMask) return false;
+  var c = s.SCL;
+  if (c === 1 || c === 3 || c === 8 || c === 9 || c === 10 || c === 11) return false;
+  return true;
 }
 function median(arr) {
   arr.sort(function(a, b) { return a - b; });
@@ -1049,7 +1164,7 @@ function evaluatePixel(samples) {
   var vals = [];
   for (var i = 0; i < samples.length; i++) {
     var s = samples[i];
-    if (!s.dataMask) continue;
+    if (!sclOk(s)) continue;
     var denom = s.B08 + s.B04;
     if (denom < 0.01) continue;
     var ndvi = (s.B08 - s.B04) / denom;
@@ -1063,9 +1178,15 @@ function evaluatePixel(samples) {
 _COMPOSITE_NBR_EVALSCRIPT = """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B08", "B12", "dataMask"], mosaicking: "ORBIT" }],
+    input: [{ bands: ["B08", "B12", "SCL", "dataMask"], mosaicking: "ORBIT" }],
     output: [{ id: "default", bands: 1, sampleType: "FLOAT32" }]
   };
+}
+function sclOk(s) {
+  if (!s.dataMask) return false;
+  var c = s.SCL;
+  if (c === 1 || c === 3 || c === 8 || c === 9 || c === 10 || c === 11) return false;
+  return true;
 }
 function median(arr) {
   arr.sort(function(a, b) { return a - b; });
@@ -1076,7 +1197,7 @@ function evaluatePixel(samples) {
   var vals = [];
   for (var i = 0; i < samples.length; i++) {
     var s = samples[i];
-    if (!s.dataMask) continue;
+    if (!sclOk(s)) continue;
     var denom = s.B08 + s.B12;
     if (denom < 0.01) continue;
     var nbr = (s.B08 - s.B12) / denom;
@@ -1086,17 +1207,45 @@ function evaluatePixel(samples) {
   return [median(vals)];
 }"""
 
+
+_COMPOSITE_NDVI_MEDIAN_EVALSCRIPT = """//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B04", "B08", "SCL", "dataMask"], mosaicking: "ORBIT" }],
+    output: [{ id: "default", bands: 1, sampleType: "FLOAT32" }]
+  };
+}
+function sclOk(s) {
+  if (!s.dataMask) return false;
+  var c = s.SCL;
+  if (c === 1 || c === 3 || c === 8 || c === 9 || c === 10 || c === 11) return false;
+  return true;
+}
+function median(arr) { arr.sort(function(a,b){return a-b;}); var m=Math.floor(arr.length/2); return arr.length%2!==0?arr[m]:(arr[m-1]+arr[m])/2; }
+function evaluatePixel(samples) {
+  var ndviVals = [];
+  for (var i = 0; i < samples.length; i++) {
+    var s = samples[i];
+    if (!sclOk(s)) continue;
+    var denom = s.B08 + s.B04;
+    if (denom < 0.01) continue;
+    ndviVals.push(Math.max(-1, Math.min(1, (s.B08 - s.B04) / denom)));
+  }
+  if (ndviVals.length === 0) return [NaN];
+  return [median(ndviVals)];
+}"""
+
 # Evalscripts for downloading a single-scene index raster as FLOAT32 TIFF.
 _INDEX_RASTER_EVALSCRIPTS: dict[str, str] = {
     "ndvi": """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B08", "dataMask"] }],
+    input: [{ bands: ["B04", "B08", "SCL", "dataMask"] }],
     output: [{ id: "default", bands: 1, sampleType: "FLOAT32" }]
   };
 }
 function evaluatePixel(s) {
-  if (!s.dataMask) return [NaN];
+  if (!s.dataMask || s.SCL === 1 || s.SCL === 3 || s.SCL === 8 || s.SCL === 9 || s.SCL === 10 || s.SCL === 11) return [NaN];
   var denom = s.B08 + s.B04;
   if (denom < 0.01) return [NaN];
   var ndvi = (s.B08 - s.B04) / denom;
@@ -1105,12 +1254,12 @@ function evaluatePixel(s) {
     "bais2": """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B06", "B07", "B8A", "B12", "dataMask"] }],
+    input: [{ bands: ["B04", "B06", "B07", "B8A", "B12", "SCL", "dataMask"] }],
     output: [{ id: "default", bands: 1, sampleType: "FLOAT32" }]
   };
 }
 function evaluatePixel(s) {
-  if (!s.dataMask) return [NaN];
+  if (!s.dataMask || s.SCL === 1 || s.SCL === 3 || s.SCL === 8 || s.SCL === 9 || s.SCL === 10 || s.SCL === 11) return [NaN];
   if (s.B04 < 0.001 || s.B8A < 0.001) return [NaN];
   var r = (s.B06 * s.B07 * s.B8A) / s.B04;
   if (r < 0) r = 0;
@@ -1119,21 +1268,37 @@ function evaluatePixel(s) {
   var bais2 = (1 - Math.sqrt(r)) * ((s.B12 - s.B8A) / Math.sqrt(sw) + 1);
   return [Math.max(-10, Math.min(10, bais2))];
 }""",
+
     "nbr": """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B08", "B12", "dataMask"] }],
+    input: [{ bands: ["B08", "B12", "SCL", "dataMask"] }],
     output: [{ id: "default", bands: 1, sampleType: "FLOAT32" }]
   };
 }
 function evaluatePixel(s) {
-  if (!s.dataMask) return [NaN];
+  if (!s.dataMask || s.SCL === 1 || s.SCL === 3 || s.SCL === 8 || s.SCL === 9 || s.SCL === 10 || s.SCL === 11) return [NaN];
   var denom = s.B08 + s.B12;
   if (denom < 0.01) return [NaN];
   var nbr = (s.B08 - s.B12) / denom;
   return [Math.max(-1, Math.min(1, nbr))];
 }""",
 }
+
+# Single-band SCL-only screen: 1.0 where the pixel is usable, NaN
+# otherwise. Used to check AOI coverage for a scene *before* spending a
+# download per requested metric on it.
+_SCL_COVERAGE_EVALSCRIPT = """//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["SCL", "dataMask"] }],
+    output: [{ id: "default", bands: 1, sampleType: "FLOAT32" }]
+  };
+}
+function evaluatePixel(s) {
+  if (!s.dataMask || s.SCL === 1 || s.SCL === 3 || s.SCL === 8 || s.SCL === 9 || s.SCL === 10 || s.SCL === 11) return [NaN];
+  return [1.0];
+}"""
 
 
 def _generate_metric_plots(
@@ -1144,11 +1309,6 @@ def _generate_metric_plots(
     save_dir: Path,
 ) -> dict[str, str]:
     """Generate time-series plots for each metric. Returns {metric: filepath}."""
-    import math
-
-    import matplotlib
-
-    matplotlib.use("Agg")
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
 
@@ -1191,30 +1351,20 @@ def _generate_metric_plots(
             hi = [r[3] for r in rows]
 
             ax.plot(
-                dates,
-                means,
-                marker=marker,
-                color=color,
-                label=phase_label,
-                markersize=5,
-                linewidth=1.5,
+                dates, means, marker=marker, color=color,
+                label=phase_label, markersize=5, linewidth=1.5,
             )
             ax.fill_between(dates, lo, hi, color=color, alpha=0.15)
 
         ax.axvline(
-            fire_dt,
-            color="#E65100",
-            linestyle="--",
-            linewidth=2,
-            label="Fire date",
-            zorder=5,
+            fire_dt, color="#E65100", linestyle="--",
+            linewidth=2, label="Fire date", zorder=5,
         )
         ax.set_xlabel("Date", fontsize=11)
         ax.set_ylabel(metric_name.upper(), fontsize=11)
         ax.set_title(
             f"{metric_name.upper()} \u2014 Time Series Around Fire ({fire_date})",
-            fontsize=13,
-            fontweight="bold",
+            fontsize=13, fontweight="bold",
         )
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
@@ -1224,11 +1374,8 @@ def _generate_metric_plots(
 
         filepath = save_dir / f"{metric_name}_timeseries_{fire_date}.png"
         fig.savefig(
-            str(filepath),
-            dpi=150,
-            bbox_inches="tight",
-            facecolor="white",
-            edgecolor="none",
+            str(filepath), dpi=150, bbox_inches="tight",
+            facecolor="white", edgecolor="none",
         )
         plt.close(fig)
         plots[metric_name] = str(filepath)
@@ -1253,11 +1400,6 @@ def _tiff_to_numpy(
     corrupts float pixel values).  Replaces non-finite values and
     values outside the physically valid range for *metric* with NaN.
     """
-    import io
-
-    import numpy as np
-    import tifffile
-
     arr = tifffile.imread(io.BytesIO(data)).astype(np.float32)
     arr[~np.isfinite(arr)] = np.nan
 
@@ -1268,11 +1410,10 @@ def _tiff_to_numpy(
 
 async def _download_composite(
     token: str,
-    bbox: list[float],
+    bounds: dict[str, Any],
+    size: dict[str, Any],
     time_from: str,
     time_to: str,
-    width: int,
-    height: int,
     max_cloud_cover: float,
     metric: str,
 ) -> np.ndarray:
@@ -1290,23 +1431,17 @@ async def _download_composite(
 
     req_body = {
         "input": {
-            "bounds": {
-                "bbox": bbox,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
-            },
-            "data": [
-                {
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {"from": time_from, "to": time_to},
-                        "maxCloudCoverage": max_cloud_cover,
-                    },
-                }
-            ],
+            "bounds": bounds,
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "timeRange": {"from": time_from, "to": time_to},
+                    "maxCloudCoverage": max_cloud_cover,
+                },
+            }],
         },
         "output": {
-            "width": width,
-            "height": height,
+            **size,
             "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
         },
         "evalscript": evalscript,
@@ -1330,20 +1465,18 @@ def _compute_burn_mask(
     threshold: float,
 ) -> np.ndarray:
     """Burn mask from dNBR = pre_median - post_median > threshold."""
-    import numpy as np
-
     valid = np.isfinite(pre_composite) & np.isfinite(post_composite)
-    dnbr = pre_composite.astype(np.float64) - post_composite.astype(np.float64)
+    dnbr = (pre_composite.astype(np.float64)
+            - post_composite.astype(np.float64))
     return valid & (dnbr > threshold)
 
 
 async def _download_index_raster(
     token: str,
-    bbox: list[float],
+    bounds: dict[str, Any],
+    size: dict[str, Any],
     scene_date: str,
     metric: str,
-    width: int,
-    height: int,
     max_cloud_cover: float,
 ) -> np.ndarray:
     """Download a single-scene index raster (NDVI or BAIS2) as a numpy array."""
@@ -1351,24 +1484,18 @@ async def _download_index_raster(
     scene_to = f"{scene_date}T23:59:59Z"
     req_body = {
         "input": {
-            "bounds": {
-                "bbox": bbox,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
-            },
-            "data": [
-                {
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {"from": scene_from, "to": scene_to},
-                        "maxCloudCoverage": max_cloud_cover,
-                        "mosaickingOrder": "leastCC",
-                    },
-                }
-            ],
+            "bounds": bounds,
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "timeRange": {"from": scene_from, "to": scene_to},
+                    "maxCloudCoverage": max_cloud_cover,
+                    "mosaickingOrder": "leastCC",
+                },
+            }],
         },
         "output": {
-            "width": width,
-            "height": height,
+            **size,
             "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
         },
         "evalscript": _INDEX_RASTER_EVALSCRIPTS[metric],
@@ -1386,17 +1513,74 @@ async def _download_index_raster(
     return _tiff_to_numpy(resp.content, metric=metric)
 
 
+async def _download_scl_coverage(
+    token: str,
+    bounds: dict[str, Any],
+    size: dict[str, Any],
+    scene_date: str,
+    max_cloud_cover: float,
+) -> float:
+    """AOI coverage of a single scene from a cheap SCL-only download.
+
+    Screens a catalog candidate *before* downloading a full raster per
+    requested metric: one small single-band request tells us whether the
+    scene is worth spending NDVI/NBR/BAIS2 downloads on at all.
+    """
+    scene_from = f"{scene_date}T00:00:00Z"
+    scene_to = f"{scene_date}T23:59:59Z"
+    req_body = {
+        "input": {
+            "bounds": bounds,
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "timeRange": {"from": scene_from, "to": scene_to},
+                    "maxCloudCoverage": max_cloud_cover,
+                    "mosaickingOrder": "leastCC",
+                },
+            }],
+        },
+        "output": {
+            **size,
+            "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
+        },
+        "evalscript": _SCL_COVERAGE_EVALSCRIPT,
+    }
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+        resp = await client.post(
+            CDSE_PROCESS_URL,
+            json=req_body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        resp.raise_for_status()
+    arr = tifffile.imread(io.BytesIO(resp.content)).astype(np.float32)
+    return _aoi_coverage_fraction(arr)
+
+
 # ── Recovery analysis helpers (VRR — Lin et al. 2005) ────────────────────
 
 _COMPOSITE_MULTIBAND_EVALSCRIPT = """//VERSION=3
 function setup() {
-  return { input: [{ bands: ["B04", "B08", "dataMask"], mosaicking: "ORBIT" }],
+  return { input: [{ bands: ["B04", "B08", "SCL", "dataMask"], mosaicking: "ORBIT" }],
            output: [{ id: "default", bands: 2, sampleType: "FLOAT32" }] };
+}
+function sclOk(s) {
+  if (!s.dataMask) return false;
+  var c = s.SCL;
+  if (c === 1 || c === 3 || c === 8 || c === 9 || c === 10 || c === 11) return false;
+  return true;
 }
 function median(arr) { arr.sort(function(a,b){return a-b;}); var m=Math.floor(arr.length/2); return arr.length%2!==0?arr[m]:(arr[m-1]+arr[m])/2; }
 function evaluatePixel(samples) {
   var b04=[], b08=[];
-  for (var i=0; i<samples.length; i++) { var s=samples[i]; if (!s.dataMask) continue; b04.push(s.B04); b08.push(s.B08); }
+  for (var i=0; i<samples.length; i++) {
+    var s=samples[i];
+    if (!sclOk(s)) continue;
+    b04.push(s.B04); b08.push(s.B08);
+  }
   if (b04.length===0) return [NaN, NaN];
   return [median(b04), median(b08)];
 }"""
@@ -1406,46 +1590,33 @@ _RECOVERY_BANDS = {"red": 0, "nir": 1}
 
 async def _download_multiband_composite(
     token: str,
-    bbox: list[float],
+    bounds: dict[str, Any],
+    size: dict[str, Any],
     time_from: str,
     time_to: str,
-    width: int,
-    height: int,
     max_cloud_cover: float,
 ) -> np.ndarray:
     """Download a RED+NIR median composite as a (2, H, W) float32 array."""
-    import io
-
-    import numpy as np
-    import tifffile
-
     req_body = {
         "input": {
-            "bounds": {
-                "bbox": bbox,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
-            },
-            "data": [
-                {
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {"from": time_from, "to": time_to},
-                        "maxCloudCoverage": max_cloud_cover,
-                    },
-                }
-            ],
+            "bounds": bounds,
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "timeRange": {"from": time_from, "to": time_to},
+                    "maxCloudCoverage": max_cloud_cover,
+                },
+            }],
         },
         "output": {
-            "width": width,
-            "height": height,
+            **size,
             "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
         },
         "evalscript": _COMPOSITE_MULTIBAND_EVALSCRIPT,
     }
     async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
         resp = await client.post(
-            CDSE_PROCESS_URL,
-            json=req_body,
+            CDSE_PROCESS_URL, json=req_body,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         )
         resp.raise_for_status()
@@ -1458,18 +1629,54 @@ async def _download_multiband_composite(
     return arr
 
 
+async def _download_ndvi_median_composite(
+    token: str,
+    bounds: dict[str, Any],
+    size: dict[str, Any],
+    time_from: str,
+    time_to: str,
+    max_cloud_cover: float,
+) -> np.ndarray:
+    """SCL-cleared per-pixel median NDVI over the time window (2-D array)."""
+    req_body = {
+        "input": {
+            "bounds": bounds,
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "timeRange": {"from": time_from, "to": time_to},
+                    "maxCloudCoverage": max_cloud_cover,
+                },
+            }],
+        },
+        "output": {
+            **size,
+            "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
+        },
+        "evalscript": _COMPOSITE_NDVI_MEDIAN_EVALSCRIPT,
+    }
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+        resp = await client.post(
+            CDSE_PROCESS_URL, json=req_body,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+    return _tiff_to_numpy(resp.content, metric="ndvi")
+
+
 def _compute_severity_map(
     pre_composite: np.ndarray,
     post_composite: np.ndarray,
 ) -> np.ndarray:
-    """Classify dNBR into severity classes 1-4 per Key & Benson (2006).
+    """Classify dNBR into severity classes per Key & Benson (2006).
 
     1=Low (0.1-0.27), 2=Moderate-low (0.27-0.44),
     3=Moderate-high (0.44-0.66), 4=High (>=0.66).
-    Pixels below 0.1 dNBR are left as 0 (unburned/regrowth).
+    0=unburned/regrowth (valid pixel, dNBR < 0.1).
+    5=no data (cloud/snow/defective in either composite) — kept distinct
+    from 0 so a cloud/snow gap in the AOI is never displayed or counted
+    as "confirmed unburned".
     """
-    import numpy as np
-
     valid = np.isfinite(pre_composite) & np.isfinite(post_composite)
     dnbr = np.where(
         valid,
@@ -1481,6 +1688,7 @@ def _compute_severity_map(
     severity[(dnbr >= 0.27) & (dnbr < 0.44)] = 2
     severity[(dnbr >= 0.44) & (dnbr < 0.66)] = 3
     severity[dnbr >= 0.66] = 4
+    severity[~valid] = 5
     return severity
 
 
@@ -1503,21 +1711,20 @@ def build_recovery_table(
         >100 % = Excellent  |  75-100 % = Very good  |  50-75 % = Good
         25-50 % = Average   |  0-25 % = Poor         |  <0 % = Very poor
     """
-    import re as _re
-
-    import numpy as np
-    import pandas as pd
-
     nir_i, red_i = bands["nir"], bands["red"]
 
-    def _ndvi(img: np.ndarray) -> np.ndarray:
+    def _as_ndvi(img: np.ndarray) -> np.ndarray:
+        if img.ndim == 2:
+            return img.astype(np.float64)
+        if img.ndim == 3 and img.shape[0] == 1:
+            return img[0].astype(np.float64)
         nir = img[nir_i].astype(np.float64)
         red = img[red_i].astype(np.float64)
         d = nir + red
         return np.where(np.abs(d) > 1e-10, (nir - red) / d, np.nan)
 
-    ndvi_pre = _ndvi(img_pre)
-    ndvi_dist = _ndvi(img_dist)
+    ndvi_pre = _as_ndvi(img_pre)
+    ndvi_dist = _as_ndvi(img_dist)
 
     sorted_labels = sorted(
         imgs_post.keys(),
@@ -1531,17 +1738,14 @@ def build_recovery_table(
             present_classes[cls] = cls_label
 
     _VRR_CLASSES = [
-        (-np.inf, 0.0, "Very poor"),
-        (0.0, 25.0, "Poor"),
-        (25.0, 50.0, "Average"),
-        (50.0, 75.0, "Good"),
-        (75.0, 100.0, "Very good"),
-        (100.0, np.inf, "Excellent"),
+        (-np.inf, 0.0, "Very poor"), (0.0, 25.0, "Poor"),
+        (25.0, 50.0, "Average"), (50.0, 75.0, "Good"),
+        (75.0, 100.0, "Very good"), (100.0, np.inf, "Excellent"),
     ]
 
     rows: list[dict] = []
     for label in sorted_labels:
-        ndvi_t = _ndvi(imgs_post[label])
+        ndvi_t = _as_ndvi(imgs_post[label])
 
         m_pre = ndvi_pre[burn_mask]
         m_dist = ndvi_dist[burn_mask]
@@ -1590,11 +1794,6 @@ def _generate_recovery_plot(
     save_dir: Path,
 ) -> str | None:
     """Generate a two-panel recovery plot: raw NDVI and VRR (%)."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import re as _re
-
     import matplotlib.pyplot as plt
 
     if recovery_df.empty:
@@ -1650,8 +1849,6 @@ def _masked_statistics(
     Values outside the physically valid range for *metric* are treated
     as nodata so they cannot corrupt the aggregation.
     """
-    import numpy as np
-
     lo, hi = _METRIC_VALID_RANGE.get(metric or "", (-10.0, 10.0))
     masked_vals = arr[mask].astype(np.float64)
     valid = np.isfinite(masked_vals) & (masked_vals >= lo) & (masked_vals <= hi)
@@ -1681,6 +1878,21 @@ def _masked_statistics(
     }
 
 
+def _aoi_coverage_fraction(arr: np.ndarray) -> float:
+    """Fraction of *all* pixels in arr that are finite after SCL/dataMask
+    screening, i.e. how much of the whole processed bbox grid has usable
+    data — independent of where the burn mask happens to fall.
+
+    Complements `_mask_coverage_fraction`, which only looks at burn-mask
+    pixels: a tile can be ranked "least cloudy" at the granule level and
+    still be mostly cloudy specifically over this AOI, so a whole-array
+    check is needed in addition to a mask-restricted one.
+    """
+    if arr.size == 0:
+        return 0.0
+    return float(np.mean(np.isfinite(arr)))
+
+
 def _mask_coverage_fraction(obs: dict, metric_names: list[str]) -> float:
     """Return the minimum valid-pixel fraction across all metrics.
 
@@ -1705,174 +1917,99 @@ def _mask_coverage_fraction(obs: dict, metric_names: list[str]) -> float:
 
 @mcp.tool()
 async def compute_metrics(
-    bbox: str,
-    fire_date: str,
-    months_before: int = 3,
-    months_after: int = 3,
-    metrics: list[str] | None = None,
-    max_cloud_cover: float = 20.0,
-    resolution_m: int = 100,
-    width: int = 512,
-    height: int = 512,
-    min_mask_coverage: float = 0.8,
-    burn_threshold: float = 0.30,
+    bbox: str, fire_date: str,
+    months_before: int = 3, months_after: int = 3,
+    metrics: list[str] | None = None, max_cloud_cover: float = 20.0,
+    resolution_m: int = 100, width: int = 512, height: int = 512,
+    min_mask_coverage: float = 0.8, burn_threshold: float = BURN_THRESHOLD_DEFAULT,
+    min_aoi_coverage: float = 0.5,
     recovery_months: list[int] | None = None,
     save_dir: str | None = None,
 ) -> str:
-    """
-    Compute spectral-index time series before and after a fire event,
+    """Compute spectral-index time series before and after a fire event,
     restricted to fire-affected pixels identified via a burn mask.
-
-    Pipeline:
-      1. Builds a per-pixel median NBR composite for the pre-fire and
-         post-fire windows (suppresses cloud/shadow noise).
-      2. Derives a burn mask from dNBR = pre_median - post_median >
-         burn_threshold.
-      3. For each cloud-free scene, downloads the index raster and computes
-         statistics only over the masked (fire-affected) pixels.
-      4. Downloads colorized visualization images via the Process API.
-      5. Generates time-series plots (matplotlib).
-      6. When "regrowth" is included in metrics, downloads pre-fire,
-         disturbance, and recovery NDVI composites and computes VRR (%)
-         per Lin et al. (2005) with classification by severity class.
-
-    Indices:
-        NDVI  — (B08 - B04) / (B08 + B04)
-        NBR   — (B08 - B12) / (B08 + B12)
-        BAIS2 — (1 - sqrt(B06*B07*B8A / B04)) * ((B12 - B8A) / sqrt(B12 + B8A) + 1)
-
-    Regrowth / VRR (Vegetation Recovery Rate, Lin et al. 2005):
-        VRR(%) = (NDVI_2 - NDVI_1) / (NDVI_0 - NDVI_1) x 100
-        Classes: Very poor (<0%), Poor (0-25%), Average (25-50%),
-                 Good (50-75%), Very good (75-100%), Excellent (>100%)
+    Includes NDVI recovery analysis at the specified post-fire months.
 
     Args:
-        bbox:             Bounding box "west,south,east,north" (lon/lat).
-        fire_date:        Date of the fire event (YYYY-MM-DD).
-        months_before:    Months of data before the fire (default 3).
-        months_after:     Months of data after the fire (default 3).
-        metrics:          List of metrics: "ndvi", "nbr", "bais2", "regrowth"
-                          (any subset). Defaults to all four.
-        max_cloud_cover:  Maximum cloud cover percentage 0-100 (default 20).
-        resolution_m:     Pixel resolution in metres (kept for backward
-                          compatibility; width/height control raster size).
-        width:            Image width in pixels (default 512).
-        height:           Image height in pixels (default 512).
-        min_mask_coverage: Minimum fraction (0-1) of burn-mask pixels that
-                        must have valid data in a scene for it to be kept.
-                        Default 0.8 (80%).
-        burn_threshold:   dNBR threshold for the burn mask (default 0.30).
-        recovery_months:  Post-fire months for VRR recovery analysis
-                        (default [12, 24, 36, 48]). Only used when
-                        "regrowth" is in metrics.
-        save_dir:         Directory to save results.
+        bbox: Bounding box "west,south,east,north" (lon/lat).
+        fire_date: Date of the fire event (YYYY-MM-DD).
+        months_before: Months of data before the fire (default 3).
+        months_after: Months of data after the fire (default 3). Also bounds the VRR disturbance (NDVI_1) median composite.
+        metrics: List of metrics: "ndvi", "nbr", "bais2", "regrowth" (default: all four). "regrowth" triggers NDVI recovery analysis and saves composite images.
+        max_cloud_cover: Maximum cloud cover percentage 0-100 (default 20).
+        resolution_m: Pixel resolution in metres on a local UTM grid (default 100). Set to 0 to use width/height.
+        width: Image width in pixels when resolution_m is 0.
+        height: Image height in pixels when resolution_m is 0.
+        min_mask_coverage: Min fraction (0-1) of *burn-mask* pixels with valid data after SCL screening (default 0.8). Rejects a scene/composite whose fire-affected pixels are too cloudy/snowy, even if the rest of the AOI is clear.
+        min_aoi_coverage: Min fraction (0-1) of valid pixels across the *whole requested bbox* after SCL screening (default 0.5). This is the AOI-level cloud-rejection rule: applied first as a cheap pre-screen of catalog candidates (before any per-metric raster download), then again on the pre/post-fire composites used to build the burn mask and on each per-scene observation, independent of where the burn mask falls.
+        burn_threshold: dNBR cutoff for the binary burn mask (default 0.10). Not a severity class.
+        recovery_months: Months after fire for NDVI₂ / VRR (default [12,24,36,48]). Each date uses a ±1 month median composite. Future months are auto-skipped. Pass [] to skip. Only used when "regrowth" is in metrics.
+        save_dir: Directory to save results.
 
     Returns:
-        JSON with burn_mask, pre/post time series, images, plots, summary,
-        and recovery table (when regrowth is enabled).
+        Compact JSON. On success, ok is true. On domain failure, ok is false with
+        error_type (cdse_auth, invalid_bbox, invalid_fire_date, unknown_metric,
+        burn_mask_unavailable) and error (sentence for the user). Tell the user
+        spectral metrics were not computed and quote error when ok is false.
+        A "warnings" list may be present even when ok is true — e.g. one phase
+        had zero usable scenes after catalog search/AOI screening, so that
+        phase's observations and images are empty while the other phase and
+        the burn mask may still be fine. Surface these warnings to the user.
     """
-    from datetime import timedelta
+
+    if recovery_months is None:
+        recovery_months = [12, 24, 36, 48]
 
     cdse_cid, cdse_csec = _resolve_cdse_creds()
     if not cdse_cid or not cdse_csec:
-        return json.dumps(
-            {
-                "error": (
-                    "CDSE credentials not set. Either send them as HTTP "
-                    "headers (X-CDSE-Client-Id / X-CDSE-Client-Secret) or "
-                    "register at https://dataspace.copernicus.eu/ and set "
-                    "CDSE_CLIENT_ID / CDSE_CLIENT_SECRET env vars on the server."
-                )
-            }
+        return _tool_error(
+            "cdse_auth",
+            "CDSE credentials not set. Either send them as HTTP "
+            "headers (X-CDSE-Client-Id / X-CDSE-Client-Secret) or "
+            "set CDSE_CLIENT_ID / CDSE_CLIENT_SECRET env vars on the server.",
         )
 
-    # ── Validate inputs ──
     try:
         parts = [float(x) for x in bbox.split(",")]
         assert len(parts) == 4
         west, south, east, north = parts
     except Exception:
-        return json.dumps({"error": f"Invalid bbox: {bbox}"})
+        return _tool_error("invalid_bbox", f"Invalid bbox: {bbox}")
 
     try:
         fire_dt = datetime.strptime(fire_date, "%Y-%m-%d")
     except ValueError:
-        return json.dumps({"error": f"Invalid fire_date: {fire_date}. Expected YYYY-MM-DD."})
+        return _tool_error(
+            "invalid_fire_date",
+            f"Invalid fire_date: {fire_date}. Expected YYYY-MM-DD.",
+        )
 
     if metrics is None:
         metrics = ["ndvi", "nbr", "bais2", "regrowth"]
     valid_metrics = {"ndvi", "nbr", "bais2", "regrowth"}
     for m in metrics:
         if m not in valid_metrics:
-            return json.dumps({"error": f"Unknown metric '{m}'. Valid: {', '.join(sorted(valid_metrics))}"})
-
-    do_regrowth = "regrowth" in metrics
+            return _tool_error(
+                "unknown_metric",
+                f"Unknown metric '{m}'. Valid: {', '.join(sorted(valid_metrics))}",
+            )
+    run_regrowth = "regrowth" in metrics
     scene_metrics = [m for m in metrics if m != "regrowth"]
-    if recovery_months is None:
-        recovery_months = [12, 24, 36, 48]
 
-    # ── Compute date ranges ──
     pre_start = _add_months(fire_dt, -months_before)
     pre_end = fire_dt - timedelta(days=1)
     post_start = fire_dt + timedelta(days=1)
     post_end = _add_months(fire_dt, months_after)
+    phases = [("pre_fire", pre_start, pre_end), ("post_fire", post_start, post_end)]
 
-    phases: list[tuple[str, datetime, datetime]] = [
-        ("pre_fire", pre_start, pre_end),
-        ("post_fire", post_start, post_end),
-    ]
-
-    # ── Authenticate (using credentials resolved at call entry) ──
     try:
         token = await _cdse_get_token(cdse_cid, cdse_csec)
     except Exception as exc:
-        return json.dumps({"error": f"CDSE authentication failed: {exc}"})
-
+        return _tool_error("cdse_auth", f"CDSE authentication failed: {exc}")
     token_acquired = datetime.utcnow()
 
-    logger.info(
-        "compute_metrics: fire=%s bbox=%s metrics=%s  %d+%d months",
-        fire_date,
-        bbox,
-        metrics,
-        months_before,
-        months_after,
-    )
-
-    result: dict[str, Any] = {
-        "source": "CDSE Sentinel Hub — Burn-Masked Per-Scene Statistics",
-        "fire_date": fire_date,
-        "bbox": bbox,
-        "config": {
-            "months_before": months_before,
-            "months_after": months_after,
-            "metrics": metrics,
-            "max_cloud_cover": max_cloud_cover,
-            "resolution_m": resolution_m,
-            "width": width,
-            "height": height,
-            "min_mask_coverage": min_mask_coverage,
-            "burn_threshold": burn_threshold,
-        },
-        "pre_fire": [],
-        "post_fire": [],
-        "images": {"pre_fire": [], "post_fire": []},
-        "plots": {},
-        "summary": {},
-    }
-
-    out_dir = Path(save_dir) if save_dir else DEFAULT_SAVE_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
-    series_dir = out_dir / f"metrics_{fire_date}"
-
-    import numpy as np
-
-    # ── Catalog search for both phases ──
-    phase_scenes: dict[str, list[dict]] = {}
-    for phase, phase_start, phase_end in phases:
-        time_from = phase_start.strftime("%Y-%m-%dT00:00:00Z")
-        time_to = phase_end.strftime("%Y-%m-%dT23:59:59Z")
-
+    async def _ensure_token() -> None:
+        nonlocal token, token_acquired
         if (datetime.utcnow() - token_acquired).total_seconds() > 240:
             try:
                 token = await _cdse_get_token(cdse_cid, cdse_csec)
@@ -1880,20 +2017,124 @@ async def compute_metrics(
             except Exception as exc:
                 logger.warning("Token refresh failed: %s", exc)
 
+    logger.info("compute_metrics: fire=%s bbox=%s metrics=%s %d+%d months", fire_date, bbox, metrics, months_before, months_after)
+
+    result: dict[str, Any] = {
+        "source": "CDSE Sentinel Hub — Burn-Masked Per-Scene Statistics",
+        "fire_date": fire_date, "bbox": bbox,
+        "config": {
+            "months_before": months_before, "months_after": months_after,
+            "metrics": metrics, "max_cloud_cover": max_cloud_cover,
+            "resolution_m": resolution_m,
+            "width": width, "height": height,
+            "min_mask_coverage": min_mask_coverage, "burn_threshold": burn_threshold,
+            "min_aoi_coverage": min_aoi_coverage,
+            "scl_invalid": list(_SCL_INVALID),
+        },
+        "pre_fire": [], "post_fire": [],
+        "images": {"pre_fire": [], "post_fire": []},
+        "plots": {}, "summary": {},
+    }
+
+    out_dir = Path(save_dir) if save_dir else Path(DEFAULT_SAVE_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    series_dir = out_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"
+
+    proc_bounds, proc_size, grid_meta = _process_grid(
+        [west, south, east, north], resolution_m, width, height,
+    )
+    result["config"]["grid"] = grid_meta
+    result["config"]["actual_resolution_m"] = grid_meta.get("actual_resolution_m")
+
+    # ── Catalog search for both phases (parallel) ──
+    async def _catalog_one(phase, phase_start, phase_end):
+        time_from = phase_start.strftime("%Y-%m-%dT00:00:00Z")
+        time_to = phase_end.strftime("%Y-%m-%dT23:59:59Z")
         try:
-            scenes = await _cdse_catalog_search(
-                token=token,
-                bbox=[west, south, east, north],
-                time_from=time_from,
-                time_to=time_to,
-                max_cloud_cover=max_cloud_cover,
-                limit=50,
-            )
-            phase_scenes[phase] = scenes
+            scenes = await _cdse_catalog_search(token, [west, south, east, north], time_from, time_to, max_cloud_cover, 50)
             logger.info("  Catalog %s: %d cloud-free scenes", phase, len(scenes))
+            return phase, scenes
         except Exception as exc:
             logger.warning("  Catalog search failed for %s: %s", phase, exc)
-            phase_scenes[phase] = []
+            return phase, []
+
+    await _ensure_token()
+    catalog_results = await asyncio.gather(*[_catalog_one(p, s, e) for p, s, e in phases])
+    phase_scenes: dict[str, list[dict]] = dict(catalog_results)
+    catalog_scene_count = sum(len(v) for v in phase_scenes.values())
+
+    # ── AOI-level screening of catalog candidates ──
+    # Catalog eo:cloud_cover and Process API leastCC only rank whole
+    # granules; a granule ranked least-cloudy can still be mostly cloudy
+    # specifically over this AOI. Run one cheap SCL-only download per
+    # candidate scene and drop it here if it fails min_aoi_coverage,
+    # before spending a download per requested metric on it.
+    aoi_prescreen_discarded = 0
+    if min_aoi_coverage > 0 and catalog_scene_count > 0:
+        _screen_sem = asyncio.Semaphore(6)
+
+        async def _screen_one(phase, scene):
+            scene_date = scene.get("properties", {}).get("datetime", "")[:10]
+            async with _screen_sem:
+                try:
+                    coverage = await _download_scl_coverage(
+                        token, proc_bounds, proc_size, scene_date, max_cloud_cover,
+                    )
+                except Exception as exc:
+                    logger.warning("  AOI screen failed for %s %s: %s", phase, scene_date, exc)
+                    coverage = 0.0
+            return phase, scene, coverage
+
+        screen_tasks = [
+            _screen_one(phase, scene)
+            for phase, _, _ in phases
+            for scene in phase_scenes.get(phase, [])
+        ]
+        await _ensure_token()
+        screen_results = await asyncio.gather(*screen_tasks) if screen_tasks else []
+
+        screened_phase_scenes: dict[str, list[dict]] = {phase: [] for phase, _, _ in phases}
+        for phase, scene, coverage in screen_results:
+            if coverage < min_aoi_coverage:
+                aoi_prescreen_discarded += 1
+                continue
+            screened_phase_scenes[phase].append(scene)
+        phase_scenes = screened_phase_scenes
+
+        for phase, _, _ in phases:
+            logger.info(
+                "  %s: %d/%d catalog scenes pass AOI screening (min_aoi_coverage=%.2f)",
+                phase, len(phase_scenes.get(phase, [])),
+                len(dict(catalog_results).get(phase, [])), min_aoi_coverage,
+            )
+
+    # ── Per-phase scene availability, made explicit (not just a zero count) ──
+    phase_warnings: list[str] = []
+    catalog_by_phase = dict(catalog_results)
+    result["catalog"] = {}
+    for phase, _, _ in phases:
+        found = len(catalog_by_phase.get(phase, []))
+        kept = len(phase_scenes.get(phase, []))
+        result["catalog"][phase] = {"found": found, "after_aoi_screening": kept}
+        if kept == 0:
+            if found == 0:
+                phase_warnings.append(
+                    f"No Sentinel-2 L2A scenes found in the catalog for {phase} "
+                    f"(max_cloud_cover={max_cloud_cover}); time-series statistics "
+                    f"and visualization images will be empty for this phase."
+                )
+            else:
+                phase_warnings.append(
+                    f"{found} catalog scene(s) found for {phase} but all were "
+                    f"discarded by AOI cloud/snow screening (min_aoi_coverage="
+                    f"{min_aoi_coverage}); time-series statistics and visualization "
+                    f"images will be empty for this phase. Try a higher "
+                    f"max_cloud_cover, a lower min_aoi_coverage, or a wider "
+                    f"months_before/months_after window."
+                )
+            logger.warning("  %s", phase_warnings[-1])
+    if phase_warnings:
+        result["warnings"] = phase_warnings
 
     # ── Compute burn mask via median NBR composites ──
     pre_from = pre_start.strftime("%Y-%m-%dT00:00:00Z")
@@ -1901,56 +2142,38 @@ async def compute_metrics(
     post_from = post_start.strftime("%Y-%m-%dT00:00:00Z")
     post_to = post_end.strftime("%Y-%m-%dT23:59:59Z")
 
-    burn_mask: np.ndarray | None = None
+    pre_composite = None
+    post_composite = None
+    burn_mask = None
     try:
-        logger.info("  Downloading pre-fire median NBR composite …")
-        pre_composite = await _download_composite(
-            token,
-            [west, south, east, north],
-            pre_from,
-            pre_to,
-            width,
-            height,
-            max_cloud_cover,
-            metric="nbr",
-        )
-        logger.info("  Downloading post-fire median NBR composite …")
-        post_composite = await _download_composite(
-            token,
-            [west, south, east, north],
-            post_from,
-            post_to,
-            width,
-            height,
-            max_cloud_cover,
-            metric="nbr",
+        logger.info("  Downloading pre/post-fire median NBR composites (parallel) ...")
+        await _ensure_token()
+        pre_composite, post_composite = await asyncio.gather(
+            _download_composite(token, proc_bounds, proc_size, pre_from, pre_to, max_cloud_cover, "nbr"),
+            _download_composite(token, proc_bounds, proc_size, post_from, post_to, max_cloud_cover, "nbr"),
         )
 
-        for label, comp in [("pre", pre_composite), ("post", post_composite)]:
-            finite = comp[np.isfinite(comp)]
-            nan_pct = 100.0 * (1 - finite.size / max(comp.size, 1))
-            if finite.size:
-                logger.info(
-                    "  %s composite: mean=%.3f  std=%.3f  min=%.3f  max=%.3f  NaN=%.1f%%",
-                    label,
-                    float(np.mean(finite)),
-                    float(np.std(finite)),
-                    float(np.min(finite)),
-                    float(np.max(finite)),
-                    nan_pct,
-                )
-            else:
-                logger.warning("  %s composite: ALL NaN", label)
+        # AOI-level check: is the composite itself usable across the whole
+        # bbox, independent of where the (not-yet-known) burn mask falls?
+        aoi_coverage_pre = _aoi_coverage_fraction(pre_composite)
+        aoi_coverage_post = _aoi_coverage_fraction(post_composite)
+        logger.info(
+            "  AOI coverage: pre=%.2f post=%.2f (min_aoi_coverage=%.2f)",
+            aoi_coverage_pre, aoi_coverage_post, min_aoi_coverage,
+        )
+        if min_aoi_coverage > 0 and (aoi_coverage_pre < min_aoi_coverage or aoi_coverage_post < min_aoi_coverage):
+            raise RuntimeError(
+                f"AOI cloud/snow coverage too low for a reliable burn mask "
+                f"(pre={aoi_coverage_pre:.2f}, post={aoi_coverage_post:.2f}, "
+                f"min_aoi_coverage={min_aoi_coverage}). Try a wider "
+                f"months_before/months_after window or a higher max_cloud_cover."
+            )
 
         series_dir.mkdir(parents=True, exist_ok=True)
-        from PIL import Image as PILImage
-
         for label, comp in [("pre", pre_composite), ("post", post_composite)]:
             vis = np.nan_to_num(comp, nan=-1.0).astype(np.float64)
             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-            comp_path = series_dir / f"composite_nbr_{label}.png"
-            PILImage.fromarray(vis, mode="L").save(str(comp_path))
-            logger.info("  Saved %s composite preview: %s", label, comp_path)
+            PILImage.fromarray(vis, mode="L").save(str(series_dir / f"composite_nbr_{label}.png"))
 
         if burn_threshold and burn_threshold > 0:
             burn_mask = _compute_burn_mask(pre_composite, post_composite, burn_threshold)
@@ -1959,95 +2182,105 @@ async def compute_metrics(
 
         n_burned = int(np.sum(burn_mask))
         n_total = int(burn_mask.size)
-        logger.info(
-            "  Burn mask: %d/%d pixels (%.1f%%)",
-            n_burned,
-            n_total,
-            100.0 * n_burned / max(n_total, 1),
-        )
+        logger.info("  Burn mask: %d/%d pixels (%.1f%%)", n_burned, n_total, 100.0 * n_burned / max(n_total, 1))
 
         mask_path = series_dir / "burn_mask.png"
-        PILImage.fromarray(
-            (burn_mask.astype(np.uint8) * 255),
-            mode="L",
-        ).save(str(mask_path))
-
-        dnbr = pre_composite.astype(np.float64) - post_composite.astype(np.float64)
-        dnbr_clipped = np.clip(np.nan_to_num(dnbr, nan=0.0), -1, 1)
-        dnbr_img = ((dnbr_clipped + 1) / 2 * 255).astype(np.uint8)
-        dnbr_path = series_dir / "dnbr.png"
-        PILImage.fromarray(dnbr_img, mode="L").save(str(dnbr_path))
+        PILImage.fromarray((burn_mask.astype(np.uint8) * 255), mode="L").save(str(mask_path))
 
         result["burn_mask"] = {
             "metric": "dnbr",
-            "burned_pixels": n_burned,
-            "total_pixels": n_total,
+            "status": "ok",
+            "burned_pixels": n_burned, "total_pixels": n_total,
             "burn_fraction": round(n_burned / max(n_total, 1), 4),
             "threshold": burn_threshold,
+            "aoi_coverage_pre": round(aoi_coverage_pre, 4),
+            "aoi_coverage_post": round(aoi_coverage_post, 4),
             "mask_path": str(mask_path),
-            "dnbr_path": str(dnbr_path),
         }
-
         if n_burned == 0:
             result["burn_mask"]["warning"] = (
-                "No burned pixels detected — statistics will be empty. Try lowering burn_threshold."
+                "No burned pixels detected — statistics will be empty. "
+                "Try lowering burn_threshold."
             )
-
     except Exception as exc:
+        # Fail closed: missing mask ≠ burned. Do not allocate an all-True array.
         logger.error("  Burn mask computation failed: %s", exc)
-        result["burn_mask"] = {"error": str(exc)}
-        burn_mask = np.ones((height, width), dtype=bool)
+        burn_mask = None
+        result["ok"] = False
+        result["error_type"] = "burn_mask_unavailable"
+        result["error"] = str(exc)
+        result["burn_mask"] = {
+            "status": "unavailable",
+            "error_type": "burn_mask_unavailable",
+            "error": str(exc),
+        }
 
-    # ── Recovery / VRR analysis ──
-    if do_regrowth and burn_mask is not None and int(np.sum(burn_mask)) > 0:
+    # ── Compute severity map from dNBR (only when the burn mask is a real array) ──
+    severity_map = None
+    if burn_mask is not None and pre_composite is not None and post_composite is not None:
         try:
-            import asyncio as _aio
-
             severity_map = _compute_severity_map(pre_composite, post_composite)
+            sev_path = series_dir / "severity_map.png"
+            series_dir.mkdir(parents=True, exist_ok=True)
+            sev_vis = np.zeros((*severity_map.shape, 3), dtype=np.uint8)
+            sev_vis[severity_map == 1] = [255, 255, 0]
+            sev_vis[severity_map == 2] = [255, 165, 0]
+            sev_vis[severity_map == 3] = [255, 69, 0]
+            sev_vis[severity_map == 4] = [139, 0, 0]
+            sev_vis[severity_map == 5] = [128, 128, 128]  # no data, distinct from unburned (black)
+            PILImage.fromarray(sev_vis, mode="RGB").save(str(sev_path))
+            sev_in_mask = severity_map[burn_mask]
+            result["severity_map"] = {
+                "path": str(sev_path),
+                # burn_mask already excludes invalid pixels, so class 5
+                # never appears in sev_in_mask; reported separately below
+                # as a whole-AOI count, complementing aoi_coverage_pre/post.
+                "no_data_pixels": int(np.sum(severity_map == 5)),
+                "classes": {
+                    "Low (1)": int(np.sum(sev_in_mask == 1)),
+                    "Mod-low (2)": int(np.sum(sev_in_mask == 2)),
+                    "Mod-high (3)": int(np.sum(sev_in_mask == 3)),
+                    "High (4)": int(np.sum(sev_in_mask == 4)),
+                },
+            }
+            logger.info("  Severity map: %s", result["severity_map"]["classes"])
+        except Exception as exc:
+            logger.error("  Severity map computation failed: %s", exc)
+            result["severity_map"] = {"error": str(exc)}
 
-            today = datetime.utcnow()
-            valid_months = [rm for rm in recovery_months if _add_months(fire_dt, rm) <= today]
+    # ── NDVI Recovery Analysis (triggered by "regrowth" metric) ──
+    if run_regrowth and recovery_months and burn_mask is not None and severity_map is not None and np.any(burn_mask):
+        try:
+            now = datetime.utcnow()
+            valid_months = [rm for rm in recovery_months if _add_months(fire_dt, rm) <= now]
             if not valid_months:
-                result["recovery"] = {"error": f"All recovery months {recovery_months} fall in the future"}
+                result["recovery"] = {"error": f"All recovery months {recovery_months} fall in the future (fire: {fire_date})"}
             else:
                 if len(valid_months) < len(recovery_months):
                     skipped = sorted(set(recovery_months) - set(valid_months))
                     logger.info("  Skipping future recovery months: %s", skipped)
                 recovery_months = valid_months
-                logger.info("  Starting VRR recovery analysis for months: %s", recovery_months)
+                logger.info("  Starting NDVI recovery analysis for months: %s", recovery_months)
 
-                img_pre_mb, img_dist_mb = await _aio.gather(
+                await _ensure_token()
+                img_pre, img_dist_ndvi = await asyncio.gather(
                     _download_multiband_composite(
-                        token,
-                        [west, south, east, north],
-                        pre_from,
-                        pre_to,
-                        width,
-                        height,
-                        max_cloud_cover,
+                        token, proc_bounds, proc_size, pre_from, pre_to, max_cloud_cover,
                     ),
-                    _download_multiband_composite(
-                        token,
-                        [west, south, east, north],
-                        post_from,
-                        post_to,
-                        width,
-                        height,
-                        max_cloud_cover,
+                    _download_ndvi_median_composite(
+                        token, proc_bounds, proc_size, post_from, post_to, max_cloud_cover,
                     ),
                 )
-                nir_i = _RECOVERY_BANDS["nir"]
-                pre_cov = float(np.sum(np.isfinite(img_pre_mb[nir_i][burn_mask]))) / max(int(np.sum(burn_mask)), 1)
-                dist_cov = float(np.sum(np.isfinite(img_dist_mb[nir_i][burn_mask]))) / max(int(np.sum(burn_mask)), 1)
-                logger.info("    Pre-fire composite coverage=%.2f", pre_cov)
-                logger.info("    Disturbance composite coverage=%.2f", dist_cov)
+                nir_band_pre = img_pre[_RECOVERY_BANDS["nir"]]
+                pre_coverage = float(np.sum(np.isfinite(nir_band_pre[burn_mask]))) / max(int(np.sum(burn_mask)), 1)
+                dist_coverage = float(np.sum(np.isfinite(img_dist_ndvi[burn_mask]))) / max(int(np.sum(burn_mask)), 1)
+                logger.info("    Pre-fire multiband composite: coverage=%.2f", pre_coverage)
+                logger.info("    Disturbance median-NDVI composite: coverage=%.2f", dist_coverage)
 
-                if pre_cov < min_mask_coverage or dist_cov < min_mask_coverage:
-                    result["recovery"] = {
-                        "error": f"Composite coverage too low (pre={pre_cov:.2f}, dist={dist_cov:.2f})"
-                    }
+                if pre_coverage < min_mask_coverage or dist_coverage < min_mask_coverage:
+                    result["recovery"] = {"error": f"Composite coverage too low (pre={pre_coverage:.2f}, dist={dist_coverage:.2f}, min={min_mask_coverage})"}
                 else:
-                    imgs_post_recovery: dict[str, np.ndarray] = {}
+                    imgs_post_recovery = {}
                     for rm in sorted(recovery_months):
                         win_center = _add_months(fire_dt, rm)
                         win_start = _add_months(win_center, -1)
@@ -2057,38 +2290,27 @@ async def compute_metrics(
                         label = f"T+{rm}mo"
                         try:
                             comp = await _download_multiband_composite(
-                                token,
-                                [west, south, east, north],
-                                t_from,
-                                t_to,
-                                width,
-                                height,
-                                max_cloud_cover,
+                                token, proc_bounds, proc_size, t_from, t_to, max_cloud_cover,
                             )
-                            cov = float(np.sum(np.isfinite(comp[nir_i][burn_mask]))) / max(int(np.sum(burn_mask)), 1)
-                            if cov >= min_mask_coverage:
+                            nir_band = comp[_RECOVERY_BANDS["nir"]]
+                            valid_in_mask = np.isfinite(nir_band[burn_mask])
+                            coverage = float(np.sum(valid_in_mask)) / max(int(np.sum(burn_mask)), 1)
+                            if coverage >= min_mask_coverage:
                                 imgs_post_recovery[label] = comp
-                                logger.info("    %s: OK (coverage=%.2f)", label, cov)
+                                logger.info("    %s: OK (coverage=%.2f)", label, coverage)
                             else:
-                                logger.info("    %s: discarded (coverage=%.2f)", label, cov)
-                        except Exception as exc_r:
-                            logger.warning("    %s: download failed: %s", label, exc_r)
+                                logger.info("    %s: discarded (coverage=%.2f < %.2f)", label, coverage, min_mask_coverage)
+                        except Exception as exc:
+                            logger.warning("    %s: download failed: %s", label, exc)
 
                     if imgs_post_recovery:
                         recovery_df = build_recovery_table(
-                            img_pre_mb,
-                            img_dist_mb,
-                            imgs_post_recovery,
-                            burn_mask,
-                            _RECOVERY_BANDS,
-                            severity_map,
+                            img_pre, img_dist_ndvi, imgs_post_recovery, burn_mask, _RECOVERY_BANDS, severity_map,
                         )
                         recovery_dir = series_dir / "recovery"
                         recovery_dir.mkdir(parents=True, exist_ok=True)
 
-                        from PIL import Image as PILImage
-
-                        def _save_ndvi_composite(img_2band: np.ndarray, tag: str, out_dir: Path) -> str:
+                        def _save_ndvi_composite(img_2band, tag, out_dir):
                             nir = img_2band[_RECOVERY_BANDS["nir"]].astype(np.float64)
                             red = img_2band[_RECOVERY_BANDS["red"]].astype(np.float64)
                             denom = nir + red
@@ -2099,17 +2321,22 @@ async def compute_metrics(
                             PILImage.fromarray(vis, mode="L").save(str(path))
                             return str(path)
 
-                        composite_paths: dict[str, str] = {}
-                        composite_paths["pre_fire"] = _save_ndvi_composite(img_pre_mb, "pre_fire", recovery_dir)
-                        composite_paths["disturbance"] = _save_ndvi_composite(img_dist_mb, "disturbance", recovery_dir)
+                        def _save_ndvi(ndvi, tag, out_dir):
+                            vis = np.nan_to_num(ndvi.astype(np.float64), nan=-1.0)
+                            vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
+                            path = out_dir / f"composite_ndvi_{tag}.png"
+                            PILImage.fromarray(vis, mode="L").save(str(path))
+                            return str(path)
+
+                        composite_paths = {}
+                        composite_paths["pre_fire"] = _save_ndvi_composite(img_pre, "pre_fire", recovery_dir)
+                        composite_paths["disturbance"] = _save_ndvi(img_dist_ndvi, "disturbance", recovery_dir)
                         for ts_label, ts_img in imgs_post_recovery.items():
                             safe_tag = ts_label.replace("+", "plus_").replace(" ", "_")
                             composite_paths[ts_label] = _save_ndvi_composite(ts_img, safe_tag, recovery_dir)
-
                         csv_path = recovery_dir / f"recovery_{fire_date}.csv"
                         recovery_df.to_csv(str(csv_path), index=False)
                         recovery_plot = _generate_recovery_plot(recovery_df, fire_date, recovery_dir)
-
                         result["recovery"] = {
                             "table": recovery_df.to_dict(orient="records"),
                             "csv_path": str(csv_path),
@@ -2124,277 +2351,203 @@ async def compute_metrics(
             logger.error("  Recovery analysis failed: %s", exc)
             result["recovery"] = {"error": str(exc)}
 
-    # ── Per-scene masked statistics ──
+    # ── Per-scene masked statistics (parallel) ──
     total_stats_obs = 0
     filtered_stats_obs = 0
-    for phase, _, _ in phases:
-        scenes = phase_scenes.get(phase, [])
-        for scene in scenes:
-            props = scene.get("properties", {})
-            scene_date = props.get("datetime", "")[:10]
+    _sem = asyncio.Semaphore(6)
 
-            if (datetime.utcnow() - token_acquired).total_seconds() > 240:
-                try:
-                    token = await _cdse_get_token(cdse_cid, cdse_csec)
-                    token_acquired = datetime.utcnow()
-                except Exception as exc:
-                    logger.warning("Token refresh failed: %s", exc)
-
+    if burn_mask is None:
+        logger.warning("  Skipping masked stats: burn mask unavailable")
+    else:
+        async def _stats_one_scene(scene, phase):
+            scene_date = scene.get("properties", {}).get("datetime", "")[:10]
             obs: dict[str, Any] = {"date": scene_date, "phase": phase}
-            for metric_name in scene_metrics:
-                try:
-                    raster = await _download_index_raster(
-                        token,
-                        [west, south, east, north],
-                        scene_date,
-                        metric_name,
-                        width,
-                        height,
-                        max_cloud_cover,
-                    )
-                    obs[metric_name] = _masked_statistics(raster, burn_mask, metric=metric_name)
-                except Exception as exc:
-                    obs[metric_name] = {"error": str(exc)}
 
+            async def _one_metric(mn):
+                async with _sem:
+                    raster = await _download_index_raster(
+                        token, proc_bounds, proc_size, scene_date, mn, max_cloud_cover,
+                    )
+                return mn, _masked_statistics(raster, burn_mask, metric=mn), _aoi_coverage_fraction(raster)
+
+            metric_results = await asyncio.gather(*[_one_metric(mn) for mn in scene_metrics], return_exceptions=True)
+            aoi_fracs: list[float] = []
+            for mr in metric_results:
+                if isinstance(mr, Exception):
+                    continue
+                mn, stat, aoi_frac = mr
+                obs[mn] = stat
+                aoi_fracs.append(aoi_frac)
+            # Min across metrics: same "every index must clear the bar" logic
+            # as _mask_coverage_fraction, but over the whole AOI grid.
+            obs["aoi_coverage"] = min(aoi_fracs) if aoi_fracs else 0.0
+            for mn in scene_metrics:
+                if mn not in obs:
+                    obs[mn] = {"error": "download failed"}
+            return obs
+
+        scene_tasks = []
+        for phase, _, _ in phases:
+            for scene in phase_scenes.get(phase, []):
+                scene_tasks.append((phase, _stats_one_scene(scene, phase)))
+
+        await _ensure_token()
+        task_results = await asyncio.gather(*[t for _, t in scene_tasks]) if scene_tasks else []
+
+        for (phase, _), obs in zip(scene_tasks, task_results, strict=True):
             total_stats_obs += 1
             coverage = _mask_coverage_fraction(obs, scene_metrics)
             obs["mask_coverage"] = round(coverage, 4)
-            if min_mask_coverage > 0 and coverage < min_mask_coverage:
+            aoi_coverage = obs.get("aoi_coverage", 0.0)
+            obs["aoi_coverage"] = round(aoi_coverage, 4)
+            mask_fails = min_mask_coverage > 0 and coverage < min_mask_coverage
+            aoi_fails = min_aoi_coverage > 0 and aoi_coverage < min_aoi_coverage
+            if mask_fails or aoi_fails:
                 filtered_stats_obs += 1
                 continue
-
             result[phase].append(obs)
+        for phase, _, _ in phases:
+            logger.info("  %s -> %d observations (masked stats)", phase, len(result[phase]))
 
-        logger.info("  %s → %d observations (masked stats)", phase, len(result[phase]))
-
-    # ── Download visualization images (reuse catalog from stats phase) ──
-    kept_dates: set[str] | None = None
-    if min_mask_coverage > 0:
+    # ── Download visualization images ──
+    kept_dates = None
+    if min_mask_coverage > 0 or min_aoi_coverage > 0:
         kept_dates = {obs["date"] for obs in result["pre_fire"] + result["post_fire"] if "date" in obs}
-        logger.info("  Dates passing %.0f%% mask-coverage filter: %d", min_mask_coverage * 100, len(kept_dates))
 
-    for phase, _, _ in phases:
-        scenes = phase_scenes.get(phase, [])
-        if not scenes:
-            continue
-
-        phase_dir = series_dir / phase
-        discarded_dir = series_dir / f"{phase}_discarded"
-
-        for scene in scenes:
-            props = scene.get("properties", {})
-            scene_date = props.get("datetime", "")[:10]
-            is_discarded = kept_dates is not None and scene_date not in kept_dates
-            cloud_cover = props.get("eo:cloud_cover", -1)
-            scene_from = f"{scene_date}T00:00:00Z"
-            scene_to = f"{scene_date}T23:59:59Z"
-
-            input_block = {
-                "bounds": {
-                    "bbox": [west, south, east, north],
-                    "properties": {
-                        "crs": "http://www.opengis.net/def/crs/EPSG/0/4326",
-                    },
-                },
-                "data": [
-                    {
-                        "type": "sentinel-2-l2a",
-                        "dataFilter": {
-                            "timeRange": {"from": scene_from, "to": scene_to},
-                            "maxCloudCoverage": max_cloud_cover,
-                            "mosaickingOrder": "leastCC",
-                        },
-                    }
-                ],
-            }
-
-            if (datetime.utcnow() - token_acquired).total_seconds() > 240:
-                try:
-                    token = await _cdse_get_token(cdse_cid, cdse_csec)
-                    token_acquired = datetime.utcnow()
-                except Exception as exc:
-                    logger.warning("Token refresh failed: %s", exc)
-
-            try:
-                async with httpx.AsyncClient(
-                    timeout=TIMEOUT,
-                    follow_redirects=True,
-                ) as client:
-                    auth_hdr = {
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    }
-
-                    for metric_name in scene_metrics:
-                        vis_eval = _METRIC_VIS_EVALSCRIPTS.get(metric_name)
-                        if not vis_eval:
-                            continue
-
-                        dest_root = discarded_dir if is_discarded else phase_dir
-                        dest_dir = dest_root / metric_name
-                        dest_dir.mkdir(parents=True, exist_ok=True)
-
-                        req_body = {
-                            "input": input_block,
-                            "output": {
-                                "width": width,
-                                "height": height,
-                                "responses": [
-                                    {
-                                        "identifier": "default",
-                                        "format": {"type": "image/png"},
-                                    }
-                                ],
-                            },
-                            "evalscript": vis_eval,
-                        }
-
-                        resp = await client.post(
-                            CDSE_PROCESS_URL,
-                            json=req_body,
-                            headers=auth_hdr,
-                        )
-
-                        if resp.status_code != 200:
-                            logger.warning(
-                                "  Image %s %s: HTTP %d",
-                                metric_name,
-                                scene_date,
-                                resp.status_code,
-                            )
-                            continue
-
-                        filename = f"{metric_name}_{scene_date}.png"
-                        filepath = dest_dir / filename
-                        filepath.write_bytes(resp.content)
-                        img_key = f"{phase}_discarded" if is_discarded else phase
-                        result["images"].setdefault(img_key, [])
-                        result["images"][img_key].append(
-                            {
-                                "date": scene_date,
-                                "metric": metric_name,
-                                "cloud_cover_pct": cloud_cover,
-                                "path": str(filepath),
-                                "size_bytes": len(resp.content),
-                            }
-                        )
-
-                        tag = " [discarded]" if is_discarded else ""
-                        logger.info(
-                            "  Image: %s %s %s  cloud=%.1f%%  %dKB%s",
-                            phase,
-                            metric_name,
-                            scene_date,
-                            cloud_cover,
-                            len(resp.content) // 1024,
-                            tag,
-                        )
-
-            except Exception as exc:
-                logger.warning(
-                    "  Image download failed for %s %s: %s",
-                    phase,
-                    scene_date,
-                    exc,
+    async def _download_vis_one(phase, scene_date, metric_name, cloud_cover):
+        vis_eval = _METRIC_VIS_EVALSCRIPTS.get(metric_name)
+        if not vis_eval:
+            return None
+        input_block = {
+            "bounds": proc_bounds,
+            "data": [{"type": "sentinel-2-l2a", "dataFilter": {"timeRange": {"from": f"{scene_date}T00:00:00Z", "to": f"{scene_date}T23:59:59Z"}, "maxCloudCoverage": max_cloud_cover, "mosaickingOrder": "leastCC"}}],
+        }
+        phase_dir = series_dir / phase / metric_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        async with _sem:
+            async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+                resp = await client.post(
+                    CDSE_PROCESS_URL,
+                    json={"input": input_block, "output": {**proc_size, "responses": [{"identifier": "default", "format": {"type": "image/png"}}]}, "evalscript": vis_eval},
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 )
+        if resp.status_code != 200:
+            return None
+        filepath = phase_dir / f"{metric_name}_{scene_date}.png"
+        filepath.write_bytes(resp.content)
+        return {"phase": phase, "date": scene_date, "metric": metric_name, "cloud_cover_pct": cloud_cover, "path": str(filepath), "size_bytes": len(resp.content)}
+
+    vis_tasks = []
+    for phase, _, _ in phases:
+        for scene in phase_scenes.get(phase, []):
+            scene_date = scene.get("properties", {}).get("datetime", "")[:10]
+            if kept_dates is not None and scene_date not in kept_dates:
+                continue
+            cloud_cover = scene.get("properties", {}).get("eo:cloud_cover", -1)
+            for metric_name in scene_metrics:
+                vis_tasks.append(_download_vis_one(phase, scene_date, metric_name, cloud_cover))
+
+    await _ensure_token()
+    vis_results = await asyncio.gather(*vis_tasks, return_exceptions=True) if vis_tasks else []
+    for vr in vis_results:
+        if isinstance(vr, dict):
+            phase = vr.pop("phase")
+            result["images"][phase].append(vr)
 
     # ── Generate time-series plots ──
     try:
         plot_dir = series_dir / "plots"
-        plot_paths = _generate_metric_plots(
-            result["pre_fire"],
-            result["post_fire"],
-            scene_metrics,
-            fire_date,
-            plot_dir,
-        )
-        result["plots"] = plot_paths
-        logger.info("  Plots saved: %s", list(plot_paths.values()))
-    except ImportError:
-        logger.warning("matplotlib not installed — skipping plot generation")
-        result["plots"] = {
-            "error": "matplotlib not installed (pip install matplotlib)",
-        }
+        result["plots"] = _generate_metric_plots(result["pre_fire"], result["post_fire"], scene_metrics, fire_date, plot_dir)
     except Exception as exc:
-        logger.warning("Plot generation failed: %s", exc)
         result["plots"] = {"error": str(exc)}
 
     # ── Compute summary ──
-    import math as _math
-
-    def _phase_means(phase_data: list[dict], metric_name: str) -> float | None:
-        vals = [
-            obs[metric_name]["mean"]
-            for obs in phase_data
-            if isinstance(obs.get(metric_name), dict)
-            and obs[metric_name].get("mean") is not None
-            and not _math.isnan(obs[metric_name]["mean"])
-        ]
+    def _phase_means(phase_data, mn):
+        vals = [o[mn]["mean"] for o in phase_data if isinstance(o.get(mn), dict) and o[mn].get("mean") is not None and not math.isnan(o[mn]["mean"])]
         return sum(vals) / len(vals) if vals else None
 
     summary: dict[str, Any] = {
         "pre_fire_observations": len([o for o in result["pre_fire"] if "error" not in o]),
         "post_fire_observations": len([o for o in result["post_fire"] if "error" not in o]),
     }
-
-    for metric_name in scene_metrics:
-        pre_mean = _phase_means(result["pre_fire"], metric_name)
-        post_mean = _phase_means(result["post_fire"], metric_name)
-        summary[f"pre_fire_mean_{metric_name}"] = round(pre_mean, 4) if pre_mean is not None else None
-        summary[f"post_fire_mean_{metric_name}"] = round(post_mean, 4) if post_mean is not None else None
-        if pre_mean is not None and post_mean is not None:
-            summary[f"{metric_name}_change"] = round(post_mean - pre_mean, 4)
-        else:
-            summary[f"{metric_name}_change"] = None
-
-    summary["images_downloaded"] = len(result["images"].get("pre_fire", [])) + len(
-        result["images"].get("post_fire", [])
-    )
-    summary["images_discarded"] = len(result["images"].get("pre_fire_discarded", [])) + len(
-        result["images"].get("post_fire_discarded", [])
-    )
-    if min_mask_coverage > 0:
-        summary["mask_coverage_filter"] = {
+    if isinstance(result.get("catalog"), dict):
+        summary["catalog"] = result["catalog"]
+    if result.get("warnings"):
+        summary["warnings"] = result["warnings"]
+    for mn in scene_metrics:
+        pre_mean = _phase_means(result["pre_fire"], mn)
+        post_mean = _phase_means(result["post_fire"], mn)
+        summary[f"pre_fire_mean_{mn}"] = round(pre_mean, 4) if pre_mean is not None else None
+        summary[f"post_fire_mean_{mn}"] = round(post_mean, 4) if post_mean is not None else None
+        summary[f"{mn}_change"] = round(post_mean - pre_mean, 4) if pre_mean is not None and post_mean is not None else None
+    summary["images_downloaded"] = len(result["images"].get("pre_fire", [])) + len(result["images"].get("post_fire", []))
+    if min_mask_coverage > 0 or min_aoi_coverage > 0:
+        summary["coverage_filter"] = {
             "min_mask_coverage": min_mask_coverage,
+            "min_aoi_coverage": min_aoi_coverage,
+            "catalog_scenes_before_aoi_prescreen": catalog_scene_count,
+            "catalog_scenes_discarded_by_aoi_prescreen": aoi_prescreen_discarded,
             "total_observations_before_filter": total_stats_obs,
             "observations_discarded": filtered_stats_obs,
         }
-    if isinstance(result.get("burn_mask"), dict) and "error" not in result["burn_mask"]:
-        summary["burn_mask"] = {
-            "burned_pixels": result["burn_mask"].get("burned_pixels"),
-            "total_pixels": result["burn_mask"].get("total_pixels"),
-            "burn_fraction": result["burn_mask"].get("burn_fraction"),
-            "threshold": burn_threshold,
+    if isinstance(result.get("burn_mask"), dict):
+        bm = result["burn_mask"]
+        if bm.get("status") == "unavailable" or bm.get("error_type"):
+            summary["burn_mask"] = {
+                "status": bm.get("status", "unavailable"),
+                "error_type": bm.get("error_type", "burn_mask_unavailable"),
+                "error": bm.get("error"),
+            }
+        elif "error" not in bm:
+            summary["burn_mask"] = {
+                "burned_pixels": bm.get("burned_pixels"),
+                "total_pixels": bm.get("total_pixels"),
+                "burn_fraction": bm.get("burn_fraction"),
+                "threshold": burn_threshold,
+                "status": bm.get("status", "ok"),
+                "aoi_coverage_pre": bm.get("aoi_coverage_pre"),
+                "aoi_coverage_post": bm.get("aoi_coverage_post"),
+            }
+    if isinstance(result.get("severity_map"), dict) and "error" not in result.get("severity_map", {}):
+        summary["severity_map"] = result["severity_map"].get("classes", {})
+    if isinstance(result.get("recovery"), dict) and "error" not in result.get("recovery", {}):
+        summary["recovery"] = {
+            "time_steps": result["recovery"].get("time_steps", []),
+            "csv_path": result["recovery"].get("csv_path"),
+            "plot_path": result["recovery"].get("plot_path"),
+            "composite_images": result["recovery"].get("composite_images", {}),
         }
     result["summary"] = summary
 
-    # ── Save full result to disk (detailed per-observation data) ──
     series_dir.mkdir(parents=True, exist_ok=True)
     filepath = series_dir / f"metrics_{fire_date}.json"
-    filepath.write_text(
-        json.dumps(result, indent=2, default=str),
-        encoding="utf-8",
-    )
+    filepath.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
 
-    # Return only the summary to the model to avoid flooding the context
-    # with hundreds of daily observations. Full data is in saved_json.
-    compact: dict[str, Any] = {
-        "source": result["source"],
-        "fire_date": fire_date,
-        "bbox": bbox,
+    compact = {
+        "ok": result.get("ok", True) and result.get("error_type") is None,
+        "source": result["source"], "fire_date": fire_date, "bbox": bbox,
         "burn_mask": result.get("burn_mask", {}),
-        "summary": summary,
-        "plots": result.get("plots", {}),
+        "severity_map": result.get("severity_map", {}),
+        "summary": summary, "plots": result.get("plots", {}),
         "images_pre_fire": len(result["images"]["pre_fire"]),
         "images_post_fire": len(result["images"]["post_fire"]),
-        "saved_json": str(filepath),
-        "save_dir": str(series_dir),
+        "saved_json": str(filepath), "save_dir": str(series_dir),
     }
-    if "recovery" in result:
-        compact["recovery"] = result["recovery"]
-
+    if result.get("warnings"):
+        compact["warnings"] = result["warnings"]
+    if result.get("error_type"):
+        compact["ok"] = False
+        compact["error_type"] = result["error_type"]
+        compact["error"] = result.get("error")
+    if isinstance(result.get("recovery"), dict) and "error" not in result.get("recovery", {}):
+        compact["recovery"] = {
+            "time_steps": result["recovery"]["time_steps"],
+            "csv_path": result["recovery"].get("csv_path"),
+            "plot_path": result["recovery"].get("plot_path"),
+            "composite_images": result["recovery"].get("composite_images", {}),
+            "table": result["recovery"].get("table"),
+        }
     return json.dumps(compact, default=str)
-
 
 # ---------------------------------------------------------------------------
 # Entry point
