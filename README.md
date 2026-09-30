@@ -4,10 +4,15 @@ A monorepo of MCP servers for Earth Observation (EO) workflows.
 
 Current server examples:
 
+- `servers/cdse` - Sentinel, Landsat, and elevation imagery via Sentinel Hub
+- `servers/dummy_image` - sample solid-color PNG images for testing MCP image responses
 - `servers/effis` - wildfire and remote sensing analysis
+- `servers/eodashboard` - ESA / NASA / JAXA EO Dashboard narratives, indicators, and STAC data
+- `servers/esa_moocs` - semantic search over Earth Observation MOOC transcripts
 - `servers/eve_retrieval` - document retrieval
-- `servers/serpapi` - web search 
+- `servers/gdacs` - search ongoing and recent natural disasters worldwide
 - `servers/geocode` - geocode places
+- `servers/serpapi` - web search
 - `servers/trallie` - structured data extraction
 
 ## Earth Virtual Expert (EVE)
