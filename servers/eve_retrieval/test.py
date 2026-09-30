@@ -154,7 +154,7 @@ async def test_retrieve(
         args["private_collections"] = private_collections
 
     print(args)
-    
+
     t0 = time.time()
     result = await session.call_tool("retrieve", args)
     elapsed = time.time() - t0
