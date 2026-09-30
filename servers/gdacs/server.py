@@ -110,6 +110,9 @@ async def search_gdacs_events(
             },
             headers={"User-Agent": GDACS_USER_AGENT},
         )
+        if not resp.text:
+            # GDACS: 204 No Content with an empty body for no results
+            return json.dumps({"error": "No results found for query."})
         results = resp.json()
     except Exception as exc:
         return json.dumps({"error": f"Disaster search failed: {exc}"})
