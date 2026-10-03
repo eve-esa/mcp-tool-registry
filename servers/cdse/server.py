@@ -24,22 +24,20 @@ Each tool returns:
 from __future__ import annotations
 
 import json
-from typing import Annotated, Optional
-
-from mcp.server.fastmcp import FastMCP
-from mcp.types import ImageContent, TextContent
-
+from typing import Annotated
 
 from helper import (
-    fetch_sentinel1_grd,
     fectch_sentinel2,
+    fetch_dem,
+    fetch_landsat_ot_l1,
+    fetch_sentinel1_grd,
     fetch_sentinel3_olci,
     fetch_sentinel3_slstr,
     fetch_sentinel3_syn_l2,
     fetch_sentinel5p_l2,
-    fetch_landsat_ot_l1,
-    fetch_dem,
 )
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ImageContent, TextContent
 
 mcp = FastMCP(
     "sentinel-hub",
@@ -100,17 +98,17 @@ def tool_sentinel1_grd(
     start_date: Annotated[str, "Start of date range, YYYY-MM-DD"],
     end_date: Annotated[str, "End of date range, YYYY-MM-DD"],
     preset: Annotated[
-        Optional[str],
+        str | None,
         "One of: vv_vh_rgb | hh_hv_rgb "
         "Omit if supplying custom_bands or evalscript.",
     ] = None,
     custom_bands: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         "Explicit polarisation list, e.g. ['VV'] or ['VV','VH']. "
         "Overrides preset.",
     ] = None,
     evalscript: Annotated[
-        Optional[str],
+        str | None,
         "Raw Sentinel Hub evalscript (VERSION=3 JS). Overrides preset and custom_bands.",
     ] = None,
     orthorectify: Annotated[bool, "Apply geometric terrain correction (default True)"] = True,
@@ -119,25 +117,25 @@ def tool_sentinel1_grd(
         "Backscatter coefficient: GAMMA0_ELLIPSOID | GAMMA0_TERRAIN | SIGMA0_ELLIPSOID",
     ] = "GAMMA0_ELLIPSOID",
     dem_instance: Annotated[
-        Optional[str],
+        str | None,
         "DEM for orthorectification, e.g. 'COPERNICUS_30'",
     ] = None,
     acquisition_mode: Annotated[
-        Optional[str],
+        str | None,
         "Filter by mode: IW | EW | SM | WV",
     ] = None,
     polarization: Annotated[
-        Optional[str],
+        str | None,
         "Filter by polarization scheme: DV | DH | SV | SH",
     ] = None,
     orbit_direction: Annotated[
-        Optional[str],
+        str | None,
         "Filter by orbit: ASCENDING | DESCENDING",
     ] = None,
-    resolution: Annotated[Optional[str], "HIGH | MEDIUM"] = None,
+    resolution: Annotated[str | None, "HIGH | MEDIUM"] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[Optional[str], "Local file path to save the JPEG"] = None,
+    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel1_grd(
         bbox=bbox,
@@ -180,17 +178,17 @@ def tool_sentinel2(
     end_date: Annotated[str, "End of date range, YYYY-MM-DD"],
     collection: Annotated[str, "The collection of Sentinel-2 L2A or L1C"],
     preset: Annotated[
-        Optional[str],
+        str | None,
         "true_color. Omit if supplying custom_bands or evalscript.",
     ] = None,
     custom_bands: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         "Band list, e.g. ['B08','B04','B03'] for NIR false colour. "
         "Available: B01–B12, B8A.",
     ] = None,
-    evalscript: Annotated[Optional[str], "Raw evalscript. Overrides everything."] = None,
+    evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     max_cloud_cover: Annotated[
-        Optional[float], "Maximum cloud coverage 0–100 (%)"
+        float | None, "Maximum cloud coverage 0–100 (%)"
     ] = None,
     mosaicking_order: Annotated[
         str, "leastCC | mostRecent | leastRecent"
@@ -200,7 +198,7 @@ def tool_sentinel2(
     ] = False,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[Optional[str], "Local file path to save the JPEG"] = None,
+    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fectch_sentinel2(
         bbox=bbox,
@@ -240,17 +238,17 @@ def tool_sentinel3_olci(
     start_date: Annotated[str, "Start of date range, YYYY-MM-DD"],
     end_date: Annotated[str, "End of date range, YYYY-MM-DD"],
     preset: Annotated[
-        Optional[str],
+        str | None,
         "true_color or otci. Omit if supplying custom_bands or evalscript.",
     ] = None,
     custom_bands: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         "Band list from B01–B21, e.g. ['B17','B08','B04'] for NIR false colour.",
     ] = None,
-    evalscript: Annotated[Optional[str], "Raw evalscript. Overrides everything."] = None,
+    evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[Optional[str], "Local file path to save the JPEG"] = None,
+    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel3_olci(
         bbox=bbox,
@@ -286,18 +284,18 @@ def tool_sentinel3_slstr(
     start_date: Annotated[str, "Start of date range, YYYY-MM-DD"],
     end_date: Annotated[str, "End of date range, YYYY-MM-DD"],
     preset: Annotated[
-        Optional[str],
+        str | None,
         "true_color. Omit if supplying custom_bands or evalscript.",
     ] = None,
     custom_bands: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         "Bands without view suffix, e.g. ['S5','S3','S1']. "
         "The view= parameter appends 'n' or 'o' automatically.",
     ] = None,
-    evalscript: Annotated[Optional[str], "Raw evalscript. Overrides everything."] = None,
+    evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[Optional[str], "Local file path to save the JPEG"] = None,
+    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel3_slstr(
         bbox=bbox,
@@ -331,17 +329,17 @@ def tool_sentinel3_syn_l2(
     start_date: Annotated[str, "Start of date range, YYYY-MM-DD"],
     end_date: Annotated[str, "End of date range, YYYY-MM-DD"],
     preset: Annotated[
-        Optional[str],
+        str | None,
         "true_color. Omit if supplying custom_bands or evalscript.",
     ] = None,
     custom_bands: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         "Band list, e.g. ['B17','B08','B04'] for NIR false colour.",
     ] = None,
-    evalscript: Annotated[Optional[str], "Raw evalscript. Overrides everything."] = None,
+    evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[Optional[str], "Local file path to save the JPEG"] = None,
+    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel3_syn_l2(
         bbox=bbox,
@@ -375,18 +373,18 @@ def tool_sentinel5p_l2(
     start_date: Annotated[str, "Start of date range, YYYY-MM-DD"],
     end_date: Annotated[str, "End of date range, YYYY-MM-DD"],
     preset: Annotated[
-        Optional[str],
+        str | None,
         "no2 | co | o3 | so2 | ch4 | hcho | aer_ai_340_380 | cloud_fraction. "
         "Omit if supplying custom_bands or evalscript.",
     ] = None,
     custom_bands: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         "Single S5P band name list, e.g. ['NO2'].",
     ] = None,
-    evalscript: Annotated[Optional[str], "Raw evalscript. Overrides everything."] = None,
+    evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[Optional[str], "Local file path to save the JPEG"] = None,
+    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel5p_l2(
         bbox=bbox,
@@ -422,23 +420,23 @@ def tool_landsat_ot_l1(
     start_date: Annotated[str, "Start of date range, YYYY-MM-DD"],
     end_date: Annotated[str, "End of date range, YYYY-MM-DD"],
     preset: Annotated[
-        Optional[str],
+        str | None,
         "true_color. Omit if supplying custom_bands or evalscript.",
     ] = None,
     custom_bands: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         "Band list, e.g. ['B05','B04','B03'] for NIR false colour.",
     ] = None,
-    evalscript: Annotated[Optional[str], "Raw evalscript. Overrides everything."] = None,
+    evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     max_cloud_cover: Annotated[
-        Optional[float], "Maximum cloud coverage 0–100 (%)"
+        float | None, "Maximum cloud coverage 0–100 (%)"
     ] = None,
     mosaicking_order: Annotated[
         str, "leastCC | mostRecent | leastRecent"
     ] = "leastCC",
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[Optional[str], "Local file path to save the JPEG"] = None,
+    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_landsat_ot_l1(
         bbox=bbox,
@@ -473,14 +471,14 @@ def tool_landsat_ot_l1(
 def tool_dem(
     bbox: Annotated[list[float], "Bounding box [west, south, east, north] in WGS-84"],
     preset: Annotated[
-        Optional[str],
+        str | None,
         "elevation_grey | elevation_color. Omit if supplying custom_bands or evalscript.",
     ] = None,
     custom_bands: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         "Typically ['DEM'] for raw elevation values.",
     ] = None,
-    evalscript: Annotated[Optional[str], "Raw evalscript. Overrides everything."] = None,
+    evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     dem_instance: Annotated[
         str, "COPERNICUS_30 | COPERNICUS_90 | MAPZEN"
     ] = "COPERNICUS_30",
@@ -488,7 +486,7 @@ def tool_dem(
     end_date: Annotated[str, "Ignored by DEM but required by API (YYYY-MM-DD)"] = "2020-12-31",
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[Optional[str], "Local file path to save the JPEG"] = None,
+    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_dem(
         bbox=bbox,
