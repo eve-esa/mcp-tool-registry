@@ -24,17 +24,12 @@ import base64
 import io
 import logging
 import os
-import threading
-import time
-from typing import Optional
+
+import requests
 from oauthlib.oauth2 import BackendApplicationClient
 from requests_oauthlib import OAuth2Session
 
-import requests
-
 logger = logging.getLogger(__name__)
-
-import os, requests
 
 
 _PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
@@ -65,9 +60,9 @@ def _fetch(
     end_date: str,
     width: int = 512,
     height: int = 512,
-    data_filter_extra: Optional[dict] = None,
-    processing_options: Optional[dict] = None,
-    save_path: Optional[str] = None
+    data_filter_extra: dict | None = None,
+    processing_options: dict | None = None,
+    save_path: str | None = None
 ) -> dict:
     """
     Low-level POST to the Sentinel Hub Process API.
@@ -146,7 +141,7 @@ def _fetch(
         pass
 
     # Optionally save to disk
-    saved_path: Optional[str] = None
+    saved_path: str | None = None
     if save_path:
         import pathlib
         p = pathlib.Path(save_path)
@@ -236,20 +231,20 @@ def fetch_sentinel1_grd(
     end_date: str,
     *,
     # preset OR custom bands — one must be supplied
-    preset: Optional[str] = "vv_vh_rgb",   
-    custom_bands: Optional[list[str]] = None,  # e.g. ["VV"] or ["VV","VH"]
-    evalscript: Optional[str] = None,
+    preset: str | None = "vv_vh_rgb",
+    custom_bands: list[str] | None = None,  # e.g. ["VV"] or ["VV","VH"]
+    evalscript: str | None = None,
     # S1-specific processing options
     orthorectify: bool = True,
     back_coeff: str = "GAMMA0_ELLIPSOID",  # GAMMA0_ELLIPSOID | GAMMA0_TERRAIN | SIGMA0_ELLIPSOID
-    dem_instance: Optional[str] = None,    # e.g. "COPERNICUS_30"
-    acquisition_mode: Optional[str] = None,  # "IW" | "EW" | "SM" | "WV"
-    polarization: Optional[str] = None,      # "DV" | "DH" | "SV" | "SH"
-    orbit_direction: Optional[str] = None,   # "ASCENDING" | "DESCENDING"
-    resolution: Optional[str] = None,        # "HIGH" | "MEDIUM"
+    dem_instance: str | None = None,    # e.g. "COPERNICUS_30"
+    acquisition_mode: str | None = None,  # "IW" | "EW" | "SM" | "WV"
+    polarization: str | None = None,      # "DV" | "DH" | "SV" | "SH"
+    orbit_direction: str | None = None,   # "ASCENDING" | "DESCENDING"
+    resolution: str | None = None,        # "HIGH" | "MEDIUM"
     width: int = 512,
     height: int = 512,
-    save_path: Optional[str] = None
+    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-1 GRD image from the Sentinel Hub Process API.
@@ -360,19 +355,19 @@ def fectch_sentinel2(
     bbox: list[float],
     start_date: str,
     end_date: str,
-    collection: Optional[str] = 'L2A',
+    collection: str | None = 'L2A',
     *,
-    preset: Optional[str] = "true_color",       
-    custom_bands: Optional[list[str]] = None,
-    evalscript: Optional[str] = None,
-    max_cloud_cover: Optional[float] = None,
+    preset: str | None = "true_color",
+    custom_bands: list[str] | None = None,
+    evalscript: str | None = None,
+    max_cloud_cover: float | None = None,
     mosaicking_order: str = "leastCC",
     harmonize_values: bool = False,
     width: int = 512,
     height: int = 512,
-    save_path: Optional[str] = None
+    save_path: str | None = None
 ) -> dict:
-    
+
     """
     Fetch a Sentinel-2 L1C/L2A images.
 
@@ -425,12 +420,12 @@ def fectch_sentinel2(
 
 _S3_OLCI_BANDS = ["B01","B02","B03","B04","B05","B06","B07","B08","B09","B10","B11",
           "B12","B13","B14","B15","B16","B17","B18","B19","B20","B21"]
-def _es_s3_otci(h: str = "B10", m: str = "B11", l: str = "B12") -> str:
+def _es_s3_otci(h: str = "B10", m: str = "B11", lo: str = "B12") -> str:
     return (
         "//VERSION=3\n"
-        f'function setup(){{return{{input:[{{bands:["{h}","{m}","{l}"]}}],output:{{id:"default",bands:3,sampleType:"AUTO"}}}}}}\n'
+        f'function setup(){{return{{input:[{{bands:["{h}","{m}","{lo}"]}}],output:{{id:"default",bands:3,sampleType:"AUTO"}}}}}}\n'
         "var cm=new ColorMapVisualizer([[0,[0,0,0.5]],[1,[0,0.3,0.8]],[1.8,[1,0.2,0.2]],[2.5,[1,0.9,0]],[4,[0,0.8,0.1]],[4.5,[0,0.6,0.2]],[5,[1,1,1]]]);\n"
-        f"function evaluatePixel(s){{let OTCI=(s.{l}-s.{m})/(s.{m}-s.{h});return cm.process(OTCI)}}"
+        f"function evaluatePixel(s){{let OTCI=(s.{lo}-s.{m})/(s.{m}-s.{h});return cm.process(OTCI)}}"
     )
 # def _es_s3_custom_bands(bands: list[str]) -> str:
 #     n = len(bands)
@@ -465,12 +460,12 @@ def fetch_sentinel3_olci(
     start_date: str,
     end_date: str,
     *,
-    preset: Optional[str] = "true_color",    # "otci"    
-    custom_bands: Optional[list[str]] = None,
-    evalscript: Optional[str] = None,
+    preset: str | None = "true_color",    # "otci"
+    custom_bands: list[str] | None = None,
+    evalscript: str | None = None,
     width: int = 512,
     height: int = 512,
-    save_path: Optional[str] = None
+    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-3 OLCI (Ocean and Land Colour Instrument) image.
@@ -557,12 +552,12 @@ def fetch_sentinel3_slstr(
     start_date: str,
     end_date: str,
     *,
-    preset: Optional[str] = "false_color", # "ndvi"       
-    custom_bands: Optional[list[str]] = None,
-    evalscript: Optional[str] = None,
+    preset: str | None = "false_color", # "ndvi"
+    custom_bands: list[str] | None = None,
+    evalscript: str | None = None,
     width: int = 512,
     height: int = 512,
-    save_path: Optional[str] = None
+    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-3 SLSTR (Sea and Land Surface Temperature Radiometer) image.
@@ -632,12 +627,12 @@ def fetch_sentinel3_syn_l2(
     start_date: str,
     end_date: str,
     *,
-    preset: Optional[str] = "true_color",        # "true_color"
-    custom_bands: Optional[list[str]] = None,
-    evalscript: Optional[str] = None,
+    preset: str | None = "true_color",        # "true_color"
+    custom_bands: list[str] | None = None,
+    evalscript: str | None = None,
     width: int = 512,
     height: int = 512,
-    save_path: Optional[str] = None
+    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-3 SYN L2 (Synergy OLCI+SLSTR combined) image.
@@ -751,12 +746,12 @@ def fetch_sentinel5p_l2(
     start_date: str,
     end_date: str,
     *,
-    preset: Optional[str] = "no2",
-    custom_bands: Optional[list[str]] = None,
-    evalscript: Optional[str] = None,
+    preset: str | None = "no2",
+    custom_bands: list[str] | None = None,
+    evalscript: str | None = None,
     width: int = 512,
     height: int = 512,
-    save_path: Optional[str] = None
+    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-5P L2 trace-gas product.
@@ -817,14 +812,14 @@ def fetch_landsat_ot_l1(
     start_date: str,
     end_date: str,
     *,
-    preset: Optional[str] = "true_color",        
-    custom_bands: Optional[list[str]] = None,
-    evalscript: Optional[str] = None,
-    max_cloud_cover: Optional[float] = None,
+    preset: str | None = "true_color",
+    custom_bands: list[str] | None = None,
+    evalscript: str | None = None,
+    max_cloud_cover: float | None = None,
     mosaicking_order: str = "leastCC",
     width: int = 512,
     height: int = 512,
-    save_path: Optional[str] = None
+    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Landsat 8/9 OLI-TIRS L1 image (~30 m resolution).
@@ -902,13 +897,13 @@ def fetch_dem(
     start_date: str = "2020-01-01",
     end_date: str = "2020-12-31",
     *,
-    preset: Optional[str] = "elevation_grey",       
-    custom_bands: Optional[list[str]] = None,  # typically ["DEM"]
-    evalscript: Optional[str] = None,
+    preset: str | None = "elevation_grey",
+    custom_bands: list[str] | None = None,  # typically ["DEM"]
+    evalscript: str | None = None,
     dem_instance: str = "COPERNICUS_30", # COPERNICUS_30 | COPERNICUS_90 | MAPZEN
     width: int = 512,
     height: int = 512,
-    save_path: Optional[str] = None
+    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Digital Elevation Model image.
