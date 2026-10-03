@@ -24,8 +24,6 @@ import base64
 import io
 import logging
 import os
-import threading
-import time
 from typing import Optional
 from oauthlib.oauth2 import BackendApplicationClient
 from requests_oauthlib import OAuth2Session
@@ -33,8 +31,6 @@ from requests_oauthlib import OAuth2Session
 import requests
 
 logger = logging.getLogger(__name__)
-
-import os, requests
 
 
 _PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
