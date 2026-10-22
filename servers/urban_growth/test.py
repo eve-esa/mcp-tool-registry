@@ -41,6 +41,11 @@ async def main() -> None:
             assert len(edge["years"]) == 4, edge
             print("Tile edge: change", edge["summary"]["total_change_km2"], "km2")
 
+            # 3b. Munich used to fail: Esri date-line tiles are catalogued with a global bbox
+            munich = await call(session, "urban_growth_timeseries", {"place_name": "Munich, Germany"})
+            assert "error" not in munich, munich
+            print("Munich:", munich["headline"])
+
             # 4. One-year land cover snapshot (ESA WorldCover)
             evia = await call(session, "landcover_summary", {"place_name": "Evia, Greece", "radius_km": 10})
             assert evia["dominant_class"] == "Tree cover", evia

@@ -192,28 +192,44 @@ async def _class_counts(
         for f in search.json().get("features", [])
         if (f["properties"].get("start_datetime") or f["properties"].get("datetime") or "")[:4] == str(year)
     ]
+    # The Esri tiles on the date line (zones 01 and 60) are catalogued with a global bbox
+    # (-180..180), so every search in their latitude band returns them although they hold no data there.
+    items = [f for f in items if f["bbox"][2] - f["bbox"][0] <= 180]
     if not items:
         raise LookupError(f"No {collection} data for {year} covers this area (open ocean or outside coverage).")
 
     counts: dict[int, float] = {}
     used: list[str] = []
+    failed: list[tuple[BBox, httpx.HTTPStatusError]] = []
     for item in items:
         t_west, t_south, t_east, t_north = item["bbox"]
         clip = (max(west, t_west), max(south, t_south), min(east, t_east), min(north, t_north))
         if clip[0] >= clip[2] or clip[1] >= clip[3]:
             continue
-        resp = await _request(
-            client,
-            "POST",
-            STATS_URL,
-            params={"collection": collection, "item": item["id"], "assets": asset, "categorical": "true"},
-            json=_polygon(*clip),
-        )
+        try:
+            resp = await _request(
+                client,
+                "POST",
+                STATS_URL,
+                params={"collection": collection, "item": item["id"], "assets": asset, "categorical": "true"},
+                json=_polygon(*clip),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500:
+                raise
+            failed.append((clip, exc))
+            continue
         stats = next(iter(resp.json()["properties"]["statistics"].values()))
         values, classes = stats["histogram"][0], stats["histogram"][1]
         for n_pixels, code in zip(values, classes, strict=True):
             counts[int(code)] = counts.get(int(code), 0.0) + n_pixels
         used.append(item["id"])
+    # Neighbouring tiles overlap by a few km. A tile that fails is only safe to skip when another
+    # tile that worked covers the same area; otherwise the totals would be wrong, so raise.
+    ok_boxes = [f["bbox"] for f in items if f["id"] in used]
+    for clip, exc in failed:
+        if not any(b[0] <= clip[0] and b[1] <= clip[1] and b[2] >= clip[2] and b[3] >= clip[3] for b in ok_boxes):
+            raise exc
     return counts, used
 
 
