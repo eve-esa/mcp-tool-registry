@@ -133,7 +133,7 @@ async def _resolve_area(place_name: str, bbox: str, radius_km: float) -> tuple[B
         if not 0 < radius_km <= 25:
             raise ValueError("radius_km must be greater than 0 and at most 25")
         async with httpx.AsyncClient(timeout=TIMEOUT, headers={"User-Agent": NOMINATIM_USER_AGENT}) as client:
-            resp = await client.get(NOMINATIM_URL, params={"q": place_name, "format": "json", "limit": "1"})
+            resp = await client.get(NOMINATIM_URL, params={"q": place_name, "format": "json", "limit": "1", "accept-language": "en"})
             resp.raise_for_status()
             matches = resp.json()
         if not matches:
