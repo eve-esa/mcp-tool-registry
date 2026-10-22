@@ -94,6 +94,24 @@ mcp = FastMCP("Urban Growth", host="0.0.0.0", port=8000, stateless_http=True)
 
 BBox = tuple[float, float, float, float]
 
+RETRY_STATUS = {429, 500, 502, 503, 504}
+RETRIES = 3
+
+
+async def _request(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    """HTTP call that retries temporary upstream errors (rate limit, 5xx) with a short backoff."""
+    for attempt in range(RETRIES):
+        try:
+            resp = await client.request(method, url, **kwargs)
+            if resp.status_code not in RETRY_STATUS or attempt == RETRIES - 1:
+                resp.raise_for_status()
+                return resp
+        except (httpx.ConnectError, httpx.ReadTimeout):
+            if attempt == RETRIES - 1:
+                raise
+        await asyncio.sleep(1.5 * (attempt + 1))
+    raise RuntimeError("unreachable")
+
 
 def _parse_bbox(bbox: str) -> BBox:
     """Parse and validate a "west,south,east,north" string."""
@@ -133,8 +151,9 @@ async def _resolve_area(place_name: str, bbox: str, radius_km: float) -> tuple[B
         if not 0 < radius_km <= 25:
             raise ValueError("radius_km must be greater than 0 and at most 25")
         async with httpx.AsyncClient(timeout=TIMEOUT, headers={"User-Agent": NOMINATIM_USER_AGENT}) as client:
-            resp = await client.get(NOMINATIM_URL, params={"q": place_name, "format": "json", "limit": "1", "accept-language": "en"})
-            resp.raise_for_status()
+            resp = await _request(
+                client, "GET", NOMINATIM_URL, params={"q": place_name, "format": "json", "limit": "1", "accept-language": "en"}
+            )
             matches = resp.json()
         if not matches:
             raise LookupError(f"No place found for '{place_name}'. Try a more specific name or pass a bbox.")
@@ -156,7 +175,9 @@ async def _class_counts(
 ) -> tuple[dict[int, float], list[str]]:
     """Pixel counts per class inside the box for one year, summed over all tiles the box touches."""
     west, south, east, north = box
-    search = await client.post(
+    search = await _request(
+        client,
+        "POST",
         STAC_SEARCH_URL,
         json={
             "collections": [collection],
@@ -164,7 +185,6 @@ async def _class_counts(
             "datetime": f"{year}-01-01T00:00:00Z/{year}-12-31T23:59:59Z",
         },
     )
-    search.raise_for_status()
     # An annual map's interval ends on 1 January of the next year, so the search also
     # returns the previous year's tiles. Keep only the items that start in `year`.
     items = [
@@ -182,12 +202,13 @@ async def _class_counts(
         clip = (max(west, t_west), max(south, t_south), min(east, t_east), min(north, t_north))
         if clip[0] >= clip[2] or clip[1] >= clip[3]:
             continue
-        resp = await client.post(
+        resp = await _request(
+            client,
+            "POST",
             STATS_URL,
             params={"collection": collection, "item": item["id"], "assets": asset, "categorical": "true"},
             json=_polygon(*clip),
         )
-        resp.raise_for_status()
         stats = next(iter(resp.json()["properties"]["statistics"].values()))
         values, classes = stats["histogram"][0], stats["histogram"][1]
         for n_pixels, code in zip(values, classes, strict=True):
