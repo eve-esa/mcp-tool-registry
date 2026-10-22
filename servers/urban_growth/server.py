@@ -139,6 +139,11 @@ def _polygon(west: float, south: float, east: float, north: float) -> dict[str, 
     return {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [ring]}}
 
 
+def _contains(outer: BBox, inner: BBox) -> bool:
+    """True when the `inner` lon/lat rectangle lies inside `outer`."""
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+
 def _bbox_str(box: BBox) -> str:
     return ",".join(f"{v:.5f}" for v in box)
 
@@ -217,14 +222,33 @@ async def _class_counts(
     if not items:
         raise LookupError(f"No {collection} data for {year} covers this area (open ocean or outside coverage).")
 
-    counts: dict[int, float] = {}
-    used: list[str] = []
-    failed: list[tuple[BBox, httpx.HTTPStatusError]] = []
-    for item in items:
+    # Neighbouring tiles overlap by a few km. Decide up front which tiles to read, the same way
+    # every year: start with the tile nearest the box centre and skip any tile whose part of the
+    # box already lies inside a chosen tile. This avoids counting the overlap twice and keeps the
+    # yearly series consistent.
+    centre = ((west + east) / 2, (south + north) / 2)
+
+    def _distance(f: dict[str, Any]) -> float:
+        b = boxes[f["id"]]
+        return abs((b[0] + b[2]) / 2 - centre[0]) + abs((b[1] + b[3]) / 2 - centre[1])
+
+    chosen: list[tuple[dict[str, Any], BBox]] = []
+    # Ties (a box in the overlap of two tiles) are broken by tile name without the year
+    # ("36R-2023" -> "36R"), so every year reads the same tile. The two tiles' maps can disagree in the
+    # overlap, and switching between them would show up as fake growth.
+    for item in sorted(items, key=lambda f: (round(_distance(f), 6), f["id"].split("-")[0])):
         t_west, t_south, t_east, t_north = boxes[item["id"]]
         clip = (max(west, t_west), max(south, t_south), min(east, t_east), min(north, t_north))
         if clip[0] >= clip[2] or clip[1] >= clip[3]:
             continue
+        if any(_contains(boxes[c["id"]], clip) for c, _ in chosen):
+            continue
+        chosen.append((item, clip))
+
+    counts: dict[int, float] = {}
+    used: list[tuple[str, float]] = []
+    failed: list[tuple[BBox, httpx.HTTPStatusError]] = []
+    for item, clip in chosen:
         try:
             resp = await _request(
                 client,
@@ -242,14 +266,15 @@ async def _class_counts(
         values, classes = stats["histogram"][0], stats["histogram"][1]
         for n_pixels, code in zip(values, classes, strict=True):
             counts[int(code)] = counts.get(int(code), 0.0) + n_pixels
-        used.append(item["id"])
-    # Neighbouring tiles overlap by a few km. A tile that fails is only safe to skip when another
-    # tile that worked covers the same area; otherwise the totals would be wrong, so raise.
-    ok_boxes = [boxes[f["id"]] for f in items if f["id"] in used]
+        used.append((item["id"], _area_km2(*clip)))
+    # A tile that fails is only safe to skip when a tile that worked covers the same area;
+    # otherwise the totals would be wrong, so raise.
+    ok_boxes = [boxes[item_id] for item_id, _ in used]
     for clip, exc in failed:
-        if not any(b[0] <= clip[0] and b[1] <= clip[1] and b[2] >= clip[2] and b[3] >= clip[3] for b in ok_boxes):
+        if not any(_contains(b, clip) for b in ok_boxes):
             raise exc
-    return counts, used
+    # Largest share of the box first, so callers can use [0] for the map.
+    return counts, [item_id for item_id, _ in sorted(used, key=lambda u: u[1], reverse=True)]
 
 
 def _map_url(item_id: str, box: BBox) -> str:
@@ -322,7 +347,9 @@ async def urban_growth_timeseries(
             valid = sum(n for c, n in counts.items() if c not in IO_IGNORE)
             if valid == 0:
                 raise LookupError(f"No valid land cover pixels in this area for {year}.")
-            km2 = {c: area * n / valid for c, n in counts.items() if c not in IO_IGNORE}
+            # Clouds are spread over the classes in proportion; no-data pixels (outside the map) are not.
+            covered = area * (1 - counts.get(0, 0.0) / sum(counts.values()))
+            km2 = {c: covered * n / valid for c, n in counts.items() if c not in IO_IGNORE}
             km2_per_class.append(km2)
             built = km2.get(IO_BUILT, 0.0)
             rows.append(
@@ -421,11 +448,12 @@ async def landcover_summary(
         total = sum(n for c, n in counts.items() if c != 0)
         if total == 0:
             raise LookupError("The area contains no valid land cover pixels.")
+        covered = area * total / sum(counts.values())  # no-data pixels (outside the map) are not land
         classes = [
             {
                 "class": WC_LEGEND.get(c, f"Unknown ({c})"),
                 "percent": round(100 * n / total, 2),
-                "area_km2": round(area * n / total, 2),
+                "area_km2": round(covered * n / total, 2),
             }
             for c, n in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
             if c != 0

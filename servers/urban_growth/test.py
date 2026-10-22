@@ -39,6 +39,10 @@ async def main() -> None:
                 session, "urban_growth_timeseries", {"bbox": "29.9,31.1,30.1,31.25", "start_year": 2020, "end_year": 2023}
             )
             assert len(edge["years"]) == 4, edge
+            # The box lies in the overlap of two tiles: every year must read the same tile, or the
+            # series jumps (2023 used to jump by about 36 km2 when the tile order changed).
+            tiles = {r["map_url"].split("item=")[1].split("-")[0] for r in edge["years"]}
+            assert len(tiles) == 1, tiles
             print("Tile edge: change", edge["summary"]["total_change_km2"], "km2")
 
             # 3b. Munich used to fail: Esri date-line tiles are catalogued with a global bbox
