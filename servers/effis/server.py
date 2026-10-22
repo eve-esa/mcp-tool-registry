@@ -160,10 +160,6 @@ async def _http_get(
         return resp
 
 
-def _bbox_str(west: float, south: float, east: float, north: float) -> str:
-    return f"{west},{south},{east},{north}"
-
-
 def _add_months(dt: datetime, months: int) -> datetime:
     """Add (or subtract) calendar months from a datetime, clamping the day."""
     import calendar
