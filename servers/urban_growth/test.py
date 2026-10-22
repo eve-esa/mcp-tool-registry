@@ -55,6 +55,13 @@ async def main() -> None:
             assert "error" not in auckland, auckland
             print("Auckland:", auckland["headline"])
 
+            # 3d. The documented maximum radius (25 km = a 2500 km2 box) must be accepted
+            big = await call(
+                session, "urban_growth_timeseries", {"place_name": "Karachi, Pakistan", "radius_km": 25, "start_year": 2022}
+            )
+            assert "error" not in big, big
+            print("Karachi 25 km:", big["area_km2"], "km2 box")
+
             # 4. One-year land cover snapshot (ESA WorldCover)
             evia = await call(session, "landcover_summary", {"place_name": "Evia, Greece", "radius_km": 10})
             assert evia["dominant_class"] == "Tree cover", evia

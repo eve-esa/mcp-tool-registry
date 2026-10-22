@@ -189,7 +189,8 @@ async def _resolve_area(place_name: str, bbox: str, radius_km: float) -> tuple[B
     else:
         raise ValueError("Pass either place_name or bbox.")
     area = _area_km2(*box)
-    if area > MAX_AREA_KM2:
+    # Small tolerance: radius_km=25 gives a box of exactly MAX_AREA_KM2, and rounding must not reject it.
+    if area > MAX_AREA_KM2 * 1.001:
         raise ValueError(f"Area is about {area:.0f} km2; the maximum is {MAX_AREA_KM2:.0f} km2. Use a smaller box.")
     return box, place
 
