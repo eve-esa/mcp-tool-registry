@@ -46,6 +46,11 @@ async def main() -> None:
             assert "error" not in munich, munich
             print("Munich:", munich["headline"])
 
+            # 3c. Auckland sits in the date-line zone 60, which has real data but a wrong global bbox
+            auckland = await call(session, "urban_growth_timeseries", {"place_name": "Auckland, New Zealand"})
+            assert "error" not in auckland, auckland
+            print("Auckland:", auckland["headline"])
+
             # 4. One-year land cover snapshot (ESA WorldCover)
             evia = await call(session, "landcover_summary", {"place_name": "Evia, Greece", "radius_km": 10})
             assert evia["dominant_class"] == "Tree cover", evia

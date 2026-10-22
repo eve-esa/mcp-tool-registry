@@ -32,6 +32,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 from typing import Any
 from urllib.parse import urlencode
@@ -142,6 +143,24 @@ def _bbox_str(box: BBox) -> str:
     return ",".join(f"{v:.5f}" for v in box)
 
 
+def _tile_bbox(item: dict[str, Any]) -> BBox:
+    """Real WGS84 extent of a catalogue item.
+
+    Esri tiles in UTM zones 01 and 60 straddle the date line, and the catalogue labels them with a
+    global bbox (-180..180). Searches anywhere in their latitude band then return them, and asking
+    for statistics outside their real data fails with a 500. The zone number is in the item id
+    (e.g. "60H-2023"), so rebuild the extent from it: 6 degrees wide plus a small overlap margin.
+    """
+    west, south, east, north = item["bbox"]
+    if east - west > 180:
+        match = re.match(r"(\d{2})[C-X]-", item["id"])
+        if not match:
+            return (0.0, 0.0, 0.0, 0.0)  # unknown date-line item: empty extent, so it is ignored
+        zone_west = -180.0 + 6.0 * (int(match.group(1)) - 1)
+        return (zone_west - 0.6, south, zone_west + 6.0 + 0.6, north)
+    return west, south, east, north
+
+
 async def _resolve_area(place_name: str, bbox: str, radius_km: float) -> tuple[BBox, dict[str, Any] | None]:
     """Turn either a bbox string or a place name into a validated bbox (plus place info)."""
     if bbox:
@@ -192,9 +211,9 @@ async def _class_counts(
         for f in search.json().get("features", [])
         if (f["properties"].get("start_datetime") or f["properties"].get("datetime") or "")[:4] == str(year)
     ]
-    # The Esri tiles on the date line (zones 01 and 60) are catalogued with a global bbox
-    # (-180..180), so every search in their latitude band returns them although they hold no data there.
-    items = [f for f in items if f["bbox"][2] - f["bbox"][0] <= 180]
+    boxes = {f["id"]: _tile_bbox(f) for f in items}
+    # Keep only tiles whose real extent touches the area (see _tile_bbox for the date-line tiles).
+    items = [f for f in items if boxes[f["id"]][0] < east and boxes[f["id"]][2] > west]
     if not items:
         raise LookupError(f"No {collection} data for {year} covers this area (open ocean or outside coverage).")
 
@@ -202,7 +221,7 @@ async def _class_counts(
     used: list[str] = []
     failed: list[tuple[BBox, httpx.HTTPStatusError]] = []
     for item in items:
-        t_west, t_south, t_east, t_north = item["bbox"]
+        t_west, t_south, t_east, t_north = boxes[item["id"]]
         clip = (max(west, t_west), max(south, t_south), min(east, t_east), min(north, t_north))
         if clip[0] >= clip[2] or clip[1] >= clip[3]:
             continue
@@ -226,7 +245,7 @@ async def _class_counts(
         used.append(item["id"])
     # Neighbouring tiles overlap by a few km. A tile that fails is only safe to skip when another
     # tile that worked covers the same area; otherwise the totals would be wrong, so raise.
-    ok_boxes = [f["bbox"] for f in items if f["id"] in used]
+    ok_boxes = [boxes[f["id"]] for f in items if f["id"] in used]
     for clip, exc in failed:
         if not any(b[0] <= clip[0] and b[1] <= clip[1] and b[2] >= clip[2] and b[3] >= clip[3] for b in ok_boxes):
             raise exc
