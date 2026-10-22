@@ -466,7 +466,9 @@ async def find_next_satellite_passes(
         days_ahead: How many days to look ahead, 1 to 21. Leave empty to get everything
             the published schedules contain (ESA publishes about 1 to 3 weeks ahead).
         satellites: Comma-separated groups to include: "sentinel-2", "sentinel-1",
-            "landsat". Default: all three.
+            "landsat". Default: all three. Keep the default unless the user asks for
+            specific satellites or for radar only: radar is the fallback when optical
+            passes are cloudy, and Landsat adds more optical passes.
         min_coverage_pct: Hide passes that cover less than this share of the area
             (0 to 100, default 30).
 
