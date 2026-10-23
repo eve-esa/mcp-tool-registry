@@ -21,7 +21,7 @@ import random
 import re
 import sys
 import unicodedata
-from collections import Counter
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -66,6 +66,11 @@ FALLBACK_MAX_CLOUD = 30.0
 # letters: true colour <= 1.8 vs >= 2.6; false colour <= 1.0 vs >= 2.3.
 MIN_STRUCTURE = {"true_color": 2.2, "false_color": 1.5}
 TIMEOUT = 100
+# One upstream search per letter. 40 covers a long name
+# ("supercalifragilisticexpialidocious" is 34) and rejects a paragraph.
+MAX_TEXT_CHARS = 40
+# Cap parallel Planetary Computer calls. Shared by both tools.
+REQUEST_CONCURRENCY = 8
 
 # Most NASA letters are natural colour; a few are false colour (NIR, red, green),
 # where vegetation shows red.
@@ -212,18 +217,32 @@ async def _sentinel2_tile(
     return img.convert("RGB"), meta
 
 
-def _font(size: int) -> tuple[ImageFont.FreeTypeFont, bool]:
+def _font(size: int) -> tuple[ImageFont.ImageFont, bool]:
     """Caption font, and whether it covers non-ASCII place names (e.g. "Breiðamerkurjökull").
 
-    DejaVu Sans ships with matplotlib; Pillow's built-in font lacks such characters.
+    DejaVu Sans 2.37 is bundled (DejaVuSans.ttf, DejaVuSans.LICENSE). matplotlib's
+    copy is the fallback. Pillow's built-in font lacks characters such as "ð".
+    load_default(size=) needs Pillow >= 10.1:
+    https://pillow.readthedocs.io/en/stable/releasenotes/10.1.0.html
     """
+    candidates = [Path(__file__).with_name("DejaVuSans.ttf")]
     try:
         import matplotlib
 
-        path = Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf"
-        return ImageFont.truetype(str(path), size), True
-    except (ImportError, OSError):
+        candidates.append(
+            Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf"
+        )
+    except ImportError:
+        pass
+    for path in candidates:
+        try:
+            return ImageFont.truetype(str(path), size), True
+        except OSError:
+            continue
+    try:
         return ImageFont.load_default(size=size), False
+    except TypeError:
+        return ImageFont.load_default(), False
 
 
 def _ascii(text: str) -> str:
@@ -343,22 +362,46 @@ def _structure(img: Image.Image) -> float:
     return round(float(np.hypot(gx, gy).mean()), 2)
 
 
+def _place(variant_id: str) -> tuple[float, float]:
+    letter = LETTERS[variant_id]
+    return (letter["lat"], letter["lon"])
+
+
+def _one_per_place(variants: list[str]) -> list[str]:
+    """One variant per lat/lon. Prefer a hand-tuned id when several share a place."""
+    index: dict[tuple[float, float], int] = {}
+    kept: list[str] = []
+    for variant_id in variants:
+        key = _place(variant_id)
+        slot = index.get(key)
+        if slot is None:
+            index[key] = len(kept)
+            kept.append(variant_id)
+        elif variant_id in OVERRIDES and kept[slot] not in OVERRIDES:
+            kept[slot] = variant_id
+    return kept
+
+
 def _candidate_orders(chars: list[str], rng: random.Random) -> list[list[str]]:
     """Per character, the variants to try in order.
 
     Like the NASA site, repeated letters get different places ("aaa" gives three
-    different a's) until a letter's variants run out.
+    different a's) until that letter's distinct places run out. Ids that share
+    lat/lon, such as a_6, a_7 and a_8, count as one place.
     """
     shuffled = {
-        c: rng.sample(_variants(c), len(_variants(c))) for c in sorted(set(chars))
+        c: _one_per_place(rng.sample(_variants(c), len(_variants(c))))
+        for c in sorted(set(chars))
     }
-    seen: Counter[str] = Counter()
+    used: dict[str, set[tuple[float, float]]] = {c: set() for c in shuffled}
     orders = []
     for c in chars:
         variants = shuffled[c]
-        k = seen[c] % len(variants)
-        seen[c] += 1
-        orders.append(variants[k:] + variants[:k])
+        fresh = [v for v in variants if _place(v) not in used[c]]
+        recycled = [v for v in variants if _place(v) in used[c]]
+        order = fresh + recycled
+        used[c].add(_place(order[0]))
+        orders.append(order)
     return orders
 
 
@@ -375,7 +418,7 @@ async def _first_visible_sentinel2(
     for variant_id in order:
         try:
             img, meta = await _sentinel2_tile(client, variant_id, *args)
-        except LookupError as exc:
+        except (LookupError, httpx.HTTPError) as exc:
             skipped.append({"variant_id": variant_id, "reason": str(exc)})
             continue
         meta["structure"] = _structure(img)
@@ -397,6 +440,31 @@ async def _first_visible_sentinel2(
     variant_id, img, meta = best
     skipped = [s for s in skipped if s["variant_id"] != variant_id]
     return variant_id, img, {**meta, "skipped": skipped, "low_structure": True}
+
+
+def _output_path(slug: str, kind: str, suffix: str) -> Path:
+    """Unique path so concurrent calls for the same text do not share a file."""
+    token = uuid.uuid4().hex[:12]
+    return OUTPUT_DIR / f"name_{slug}_{kind}_{token}{suffix}"
+
+
+def _period_plan(
+    start: date, end: date, frames: int
+) -> list[tuple[date, date]] | str:
+    """Inclusive day windows covering start..end, or an error string.
+
+    Widths differ by at most one day. Floor division, not round(): Python
+    rounds halves to even, and adjacent edges can then collapse and invert
+    a window. https://docs.python.org/3/library/functions.html#round
+    """
+    if not 2 <= frames <= 24:
+        return "frames must be between 2 and 24."
+    span = (end - start).days + 1
+    if frames > span:
+        return "frames cannot exceed the number of days in the window."
+    edges = [start + timedelta(days=(k * span) // frames) for k in range(frames)]
+    edges.append(end + timedelta(days=1))
+    return [(edges[k], edges[k + 1] - timedelta(days=1)) for k in range(frames)]
 
 
 def _image_content(path: Path) -> McpImage:
@@ -502,16 +570,17 @@ async def spell_name(
     Sentinel-2 image of the same places in a single call.
 
     Args:
-        text:        Word or name to spell. Letters a-z, digits 0-9, and spaces.
+        text:        Word or name to spell, at most 40 characters. Letters a-z,
+                     digits 0-9, and spaces.
         source:      "both" (default), "landsat" for the original NASA Landsat
                      images, or "sentinel2" to re-image the same places with
                      ESA Sentinel-2 L2A (Microsoft Planetary Computer).
         variant_ids: Optional list of variant ids, one per non-space character
                      (e.g. ["e_2", "s_1", "a_3"]), to reuse the same places
                      from an earlier call; these are used as given. Default:
-                     a random variant per letter, without repeats, and for
-                     Sentinel-2 the next variant is tried when a tile is
-                     featureless (e.g. open sea).
+                     a random variant per letter, without repeating a place,
+                     and for Sentinel-2 the next variant is tried when a
+                     tile is featureless (e.g. open sea).
         start_date:  Sentinel-2 only. Start of the search window, YYYY-MM-DD.
         end_date:    Sentinel-2 only. End of the search window, YYYY-MM-DD.
                      The least cloudy scene in the window is used. If none is
@@ -535,6 +604,10 @@ async def spell_name(
         are still drawn.
     """
     chars = [c for c in text.lower().strip()]
+    if len(chars) > MAX_TEXT_CHARS:
+        return json.dumps(
+            {"error": f"text must be at most {MAX_TEXT_CHARS} characters."}
+        )
     bad = sorted({c for c in chars if c != " " and not _variants(c)})
     if not chars or bad:
         return json.dumps(
@@ -568,15 +641,25 @@ async def spell_name(
 
     sources = ["landsat", "sentinel2"] if source == "both" else [source]
     s2_args = (meters_per_pixel, start_date, end_date, max_cloud, style)
+    limit = asyncio.Semaphore(REQUEST_CONCURRENCY)
     results: dict[str, list] = {}
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
             # Sentinel-2 first: it decides which variant each letter uses.
             picks = [order[0] for order in orders]
+
+            async def limited_s2(order: list[str]):
+                async with limit:
+                    return await _first_visible_sentinel2(client, order, *s2_args)
+
+            async def limited_landsat(variant_id: str):
+                async with limit:
+                    return await _landsat_tile(client, variant_id)
+
             if "sentinel2" in sources:
                 # A letter without a usable scene must not sink the other letters.
                 s2 = await asyncio.gather(
-                    *[_first_visible_sentinel2(client, o, *s2_args) for o in orders],
+                    *[limited_s2(o) for o in orders],
                     return_exceptions=True,
                 )
                 picks = [
@@ -588,7 +671,7 @@ async def spell_name(
                 ]
             if "landsat" in sources:
                 results["landsat"] = await asyncio.gather(
-                    *[_landsat_tile(client, v) for v in picks], return_exceptions=True
+                    *[limited_landsat(v) for v in picks], return_exceptions=True
                 )
     except (httpx.HTTPError, OSError) as exc:
         return json.dumps({"error": f"Image retrieval failed: {exc}"})
@@ -608,7 +691,7 @@ async def spell_name(
     slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
     images = {}
     for src in sources:
-        path = OUTPUT_DIR / f"name_{slug}_{src}.png"
+        path = _output_path(slug, src, ".png")
         _render_strip(chars, picks, results[src], letters_out, src).save(path)
         images[src] = str(path)
 
@@ -684,14 +767,15 @@ async def spell_name_timeseries(
     shows seasons, floods, snow, or river changes at the same places.
 
     Args:
-        text:        Word or name to spell. Letters a-z, digits 0-9, and spaces.
+        text:        Word or name to spell, at most 40 characters. Letters a-z,
+                     digits 0-9, and spaces.
         variant_ids: Optional variant ids, one per non-space character, e.g.
                      from an earlier spell_name call, to reuse the same places.
         start_date:  Start of the series, YYYY-MM-DD.
         end_date:    End of the series, YYYY-MM-DD.
-        frames:      Number of equal periods (2-24); e.g. 12 over a year is
-                     monthly. A letter with no clear scene in a period shows
-                     a black tile for that frame.
+        frames:      Number of equal periods (2-24), and no more than the
+                     days in the window. 12 over a year is monthly. A letter
+                     with no clear scene in a period shows a black tile.
         max_cloud:   Maximum scene cloud cover in percent.
         style:       "true_color" (default) or "false_color".
         meters_per_pixel: Zoom, as in spell_name (default 40).
@@ -708,8 +792,9 @@ async def spell_name_timeseries(
         return json.dumps({"error": "start_date and end_date must be YYYY-MM-DD."})
     if end <= start:
         return json.dumps({"error": "end_date must be after start_date."})
-    if not 2 <= frames <= 24:
-        return json.dumps({"error": "frames must be between 2 and 24."})
+    planned = _period_plan(start, end, frames)
+    if isinstance(planned, str):
+        return json.dumps({"error": planned})
 
     # Pick and check the places once over the whole window.
     first = json.loads(
@@ -729,14 +814,9 @@ async def spell_name_timeseries(
         return json.dumps(first)
     picks = [letter["variant_id"] for letter in first["letters"]]
     chars = list(text.lower().strip())
+    periods = planned
 
-    span = (end - start).days + 1
-    edges = [
-        start + timedelta(days=round(k * span / frames)) for k in range(frames + 1)
-    ]
-    periods = [(edges[k], edges[k + 1] - timedelta(days=1)) for k in range(frames)]
-
-    limit = asyncio.Semaphore(8)  # be polite to Planetary Computer
+    limit = asyncio.Semaphore(REQUEST_CONCURRENCY)
 
     async def tile(client: httpx.AsyncClient, variant_id: str, p0: date, p1: date):
         async with limit:
@@ -793,7 +873,7 @@ async def spell_name_timeseries(
     images = [im.resize((im.width // 2, im.height // 2)) for im in images]
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
-    path = OUTPUT_DIR / f"name_{slug}_timeseries.gif"
+    path = _output_path(slug, "timeseries", ".gif")
     images[0].save(
         path,
         save_all=True,
