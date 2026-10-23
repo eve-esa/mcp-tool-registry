@@ -1,5 +1,8 @@
-mcp[cli]>=1.20.0,<2.0.0
+# mcp is pinned: newer releases dropped the vendored mcp.server.fastmcp module
+# (moved to the standalone `fastmcp` package), which would break this server —
+# and any other server in this repo built against an unpinned mcp.
+mcp[cli]==1.27.0
 httpx>=0.27.0
-pillow>=10.0.0
+pillow>=10.1.0
 shapely>=2.0.0
 numpy>=1.26.0
