@@ -245,11 +245,13 @@ python server.py --transport streamable-http
 # List tools
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}'
 
 # Call a tool
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "my_tool", "arguments": {"query": "test"}}, "id": 2}'
 ```
 
@@ -301,6 +303,7 @@ curl -X POST https://<agentcore-url>/mcp \
   -H "X-CDSE-Client-Id: my-cdse-client-id" \
   -H "X-CDSE-Client-Secret: my-cdse-secret" \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"compute_metrics","arguments":{...}},"id":1}'
 ```
 
