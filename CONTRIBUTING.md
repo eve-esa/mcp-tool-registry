@@ -63,7 +63,7 @@ Tools:
 
 Usage:
     python server.py                              # stdio transport
-    python server.py --transport http --port 8000  # HTTP transport
+    python server.py --transport streamable-http --port 8000  # HTTP transport
 
 Requirements:
     pip install "mcp[cli]>=1.2.0" httpx python-dotenv
@@ -210,7 +210,7 @@ cd servers/my-server
 python server.py --transport stdio
 
 # HTTP mode (for curl testing)
-python server.py --transport http
+python server.py --transport streamable-http
 # Then in another terminal:
 curl http://localhost:8000/mcp
 ```
@@ -240,7 +240,7 @@ If you use Cursor or Claude Desktop, add the server to your MCP client config po
 
 ```bash
 cd servers/my-server
-python server.py --transport http
+python server.py --transport streamable-http
 
 # List tools
 curl -X POST http://localhost:8000/mcp \
