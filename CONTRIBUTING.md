@@ -62,7 +62,7 @@ Tools:
     my_tool — description of the tool
 
 Usage:
-    python server.py                              # stdio transport
+    python server.py                                          # stdio transport
     python server.py --transport streamable-http --port 8000  # HTTP transport
 
 Requirements:
@@ -105,8 +105,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="My Server")
     parser.add_argument(
         "--transport",
-        choices=["stdio", "http"],
-        default="http",
+        choices=["stdio", "streamable-http"],
+        default="streamable-http",
+        help="Transport type (default: streamable-http)",
     )
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
