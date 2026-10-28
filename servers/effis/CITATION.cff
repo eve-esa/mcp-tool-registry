@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: EFFIS Fire Detection MCP Server
+abstract: >-
+  MCP server for European wildfire analysis. It retrieves burnt area polygons
+  from the European Forest Fire Information System (EFFIS) and computes
+  Sentinel-2 NDVI and BAIS2 time series around fire events through the
+  Copernicus Data Space Ecosystem.
+authors:
+  - given-names: Antonio
+    family-names: Lopez
+    alias: Lopez-Antonio
+    affiliation: Pi School
+keywords:
+  - mcp
+  - earth-observation
+  - wildfire
+  - effis
+  - sentinel-2
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/effis

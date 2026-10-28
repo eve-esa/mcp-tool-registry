@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "servers/**"
+      - "!servers/*/README.md"
+      - "!servers/*/CITATION.cff"
       - "shared/**"
   workflow_dispatch:
     inputs:

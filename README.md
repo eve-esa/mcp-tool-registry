@@ -82,11 +82,12 @@ The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) (`npx @mo
 New EO tools are welcome. In short:
 
 1. Create `servers/<your-server>/` with a FastMCP `server.py` and a pinned `requirements.txt`.
-2. Add a `.env.template` if the server needs secrets, and a `test.py`.
-3. Run it locally and build it with `docker build -f shared/Dockerfile servers/<your-server>/`.
-4. Open a pull request against `main`, one server per PR.
+2. Add a `CITATION.cff` with your name, affiliation and GitHub handle. After merge, the server README is written from it.
+3. Add a `.env.template` if the server needs secrets, and a `test.py`.
+4. Run it locally and build it with `docker build -f shared/Dockerfile servers/<your-server>/`.
+5. Open a pull request against `main`, one server per PR.
 
-CI checks the folder structure, the entrypoint contract, pinned versions, secrets and file sizes, then runs `ruff` and a Docker build.
+CI checks the folder structure, the entrypoint contract, pinned versions, a valid `CITATION.cff`, secrets and file sizes, then runs `ruff` and a Docker build.
 The full guide, with a server template and the PR checklist, is in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ## Deployment and early access
