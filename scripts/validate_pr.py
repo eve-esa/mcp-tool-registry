@@ -11,9 +11,10 @@ Checks performed (exit code 1 on any failure):
     7. File size guard     — no file exceeds MAX_FILE_SIZE_MB
     8. Hardcoded secrets   — scan source files for inline credentials
     9. CITATION.cff        — valid Citation File Format 1.2.0
-   10. README citation     — README.md exists and its generated section matches CITATION.cff
 
 Non-blocking checks (warnings only — do NOT fail the build):
+   10. README citation     — README.md generated section matches CITATION.cff
+                             (.github/workflows/sync-readmes.yml writes it after merge)
    11. Ruff lint           — run ruff on the server directory, report findings
 
 Usage:
@@ -407,7 +408,7 @@ def check_citation(server_name: str) -> list[ValidationError]:
 
 
 def check_readme_citation(server_name: str) -> list[ValidationError]:
-    """Require README.md whose generated section matches CITATION.cff."""
+    """Report when README.md's generated section does not match CITATION.cff."""
     server_dir = Path("servers") / server_name
     if check_citation(server_name) or not (server_dir / CFF_FILENAME).exists():
         return []  # fix CITATION.cff first
@@ -524,12 +525,15 @@ def main() -> None:
         all_errors.extend(check_requirements_txt(server_name))
         all_errors.extend(check_env_template(server_name))
         all_errors.extend(check_citation(server_name))
-        all_errors.extend(check_readme_citation(server_name))
         all_errors.extend(check_server_startup(server_name))
 
     infra_files = has_infra_changes(changed_files)
     if infra_files:
         print(f"::warning::PR modifies shared infrastructure: {', '.join(infra_files)}")
+
+    for server_name in servers:
+        for warning in check_readme_citation(server_name):
+            print(f"::warning::{warning.message} (it is also written automatically after merge)")
 
     has_lint_warnings = False
     for server_name in servers:

@@ -21,6 +21,7 @@ This repository is a monorepo of [Model Context Protocol](https://modelcontextpr
 .github/workflows/
     deploy.yml          # Deploys servers to AgentCore on push to main
     pr-checks.yml       # Validates PRs before merge
+    sync-readmes.yml    # Writes server README citation sections after merge
 scripts/
     citation.py         # Validates CITATION.cff and generates the README citation section
     deploy_server.py    # Build + deploy logic (used by CI)
@@ -44,7 +45,7 @@ Each server directory contains:
 | `server.py` | Yes | FastMCP entrypoint — the only file the container runs |
 | `requirements.txt` | Yes | pip dependencies with version constraints |
 | `CITATION.cff` | Yes | Authors and citation metadata in [Citation File Format](https://citation-file-format.github.io/) 1.2.0 |
-| `README.md` | Yes | Server docs; its Authors and Citation section is generated from `CITATION.cff` |
+| `README.md` | No | Server docs; created or extended after merge with an Authors and Citation section from `CITATION.cff` |
 | `.env.template` | No | Secret placeholders; CI substitutes them at deploy time |
 | `test.py` | No (recommended) | Local test script |
 
@@ -129,11 +130,7 @@ httpx>=0.27.0
 python-dotenv>=1.0.0
 ```
 
-Add your attribution in `servers/my-server/CITATION.cff` (see [step 5](#5-add-citationcff-attribution)) and generate the README:
-
-```bash
-python scripts/citation.py servers/my-server
-```
+Add your attribution in `servers/my-server/CITATION.cff` (see [step 5](#5-add-citationcff-attribution)). The server README is generated from it after merge.
 
 Then test locally, build Docker, and open a PR. The rest of this guide explains each piece in detail.
 
@@ -243,19 +240,21 @@ Rules:
 - Only keys defined by CFF are allowed. CI rejects unknown keys and badly formatted values, such as an ORCID without `https://orcid.org/`.
 - The [cffinit](https://citation-file-format.github.io/cffinit/) web form can generate the file for you.
 
-### 6. Generate `README.md`
+### 6. `README.md` (written for you)
 
-The README's Authors and Citation section is generated from `CITATION.cff`:
+The README's Authors and Citation section is generated from `CITATION.cff`. You do not need to do anything: after your PR is merged, the [Sync server READMEs](.github/workflows/sync-readmes.yml) workflow writes it and commits it to `main`.
+
+- If `README.md` does not exist, it is created from the CFF `title` and `abstract`, followed by the generated section.
+- If you already wrote a `README.md`, the generated section is appended at the end. Your text is never changed.
+- The section sits between `<!-- BEGIN GENERATED CITATION ... -->` and `<!-- END GENERATED CITATION -->` markers. Do not edit it by hand. Edit `CITATION.cff` instead; only the text between the markers is replaced.
+
+To preview the result before opening your PR, run it locally (needs `pip install -r scripts/requirements.txt`):
 
 ```bash
 python scripts/citation.py servers/my-server
 ```
 
-- If `README.md` does not exist, the script creates it from the CFF `title` and `abstract`, followed by the generated section.
-- If you already wrote a `README.md`, the script appends the generated section at the end. Your text is never changed.
-- The section sits between `<!-- BEGIN GENERATED CITATION ... -->` and `<!-- END GENERATED CITATION -->` markers. Do not edit it by hand. Edit `CITATION.cff` and run the script again; it replaces only what is between the markers.
-
-CI fails when the README is missing or out of date with `CITATION.cff`. Check locally with `python scripts/citation.py servers/my-server --check`. The scripts need `pip install -r scripts/requirements.txt`.
+CI shows a warning, not an error, when the README in your PR is out of date.
 
 ### 7. Write `test.py` (recommended)
 
@@ -492,7 +491,7 @@ Every PR is validated automatically. Here is the full set of rules at a glance:
 | One server per PR | Changed files must touch at most one `servers/<name>/` directory |
 | Required files | `server.py`, `requirements.txt`, and `CITATION.cff` must exist |
 | Citation metadata | `CITATION.cff` must be valid against the official CFF 1.2.0 schema |
-| README citation | `README.md` must exist and its generated section must match `CITATION.cff` |
+| README citation | Warning only: `README.md` generated section differs from `CITATION.cff`; it is rewritten after merge |
 | Entrypoint contract | `FastMCP(host="0.0.0.0", port=8000, stateless_http=True)` and `mcp.run(transport="streamable-http")` |
 | Version constraints | Every line in `requirements.txt` must have `>=`, `==`, etc. |
 | No secrets in files | `.env` files, `*.pem`, `*.key`, `credentials.json`, `token.json` are blocked |
@@ -511,7 +510,6 @@ Copy this checklist into your PR description:
 - [ ] `server.py` follows the entrypoint contract (FastMCP settings + streamable-http transport)
 - [ ] `requirements.txt` exists and all dependencies have version constraints
 - [ ] `CITATION.cff` lists all authors and is valid CFF 1.2.0
-- [ ] `README.md` regenerated with `python scripts/citation.py servers/my-server`
 - [ ] No `.env` files, credentials, or keys committed (only `.env.template`)
 - [ ] No hardcoded secrets in source code (use `os.environ` / `os.getenv`)
 - [ ] `.env.template` uses `${PLACEHOLDER}` syntax for secrets (if applicable)

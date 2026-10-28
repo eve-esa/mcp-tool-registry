@@ -51,7 +51,7 @@ python servers/<server-name>/server.py --transport stdio
 1. Create `servers/<new-server>/`
 2. Add `server.py` (FastMCP entrypoint)
 3. Add `requirements.txt`
-4. Add `CITATION.cff` with your authorship, then generate the README with `python scripts/citation.py servers/<new-server>`
+4. Add `CITATION.cff` with your authorship; the server README is generated from it after merge
 5. Optionally add `.env.template` and `test.py`
 6. Validate locally, then open a PR
 
