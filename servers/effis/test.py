@@ -205,6 +205,7 @@ async def test_compute_metrics(session: ClientSession) -> dict:
             "months_after": 2,
             "metrics": ["ndvi"],
             "max_cloud_cover": 30.0,
+            "resolution_m": 0,
             "width": 128,
             "height": 128,
         },
@@ -237,7 +238,12 @@ def run_unit_tests():
     import numpy as np
 
     sys.path.insert(0, str(SERVER_DIR))
-    from server import _compute_severity_map, build_recovery_table
+    from server import (
+        _compute_severity_map,
+        _expand_bbox_km,
+        _split_antimeridian_bbox,
+        build_recovery_table,
+    )
 
     # --- Severity map ---
     _section("UNIT TEST: _compute_severity_map (Key & Benson 2006)")
@@ -249,7 +255,13 @@ def run_unit_tests():
     assert sev.tolist() == expected, f"Severity mismatch: {sev.tolist()} != {expected}"
     print(f"  dNBR:     {(pre - post).tolist()}")
     print(f"  Severity: {sev.tolist()}")
-    print("  [PASS] severity map correct")
+
+    pre_gap = pre.copy()
+    pre_gap[0] = np.nan
+    sev_gap = _compute_severity_map(pre_gap, post)
+    assert sev_gap[0] == 5, f"Invalid pixel should be class 5 (no data), got {sev_gap[0]}"
+    assert sev_gap[1:].tolist() == expected[1:]
+    print("  [PASS] severity map correct (class 5 = no data, not unburned)")
 
     # --- VRR / recovery table ---
     _section("UNIT TEST: build_recovery_table (VRR — Lin et al. 2005)")
@@ -308,6 +320,25 @@ def run_unit_tests():
     print("  Denominator guard (NaN) correct")
 
     print("  [PASS] all VRR tests passed")
+
+    # --- Geodesic bbox (Karney 2013 via pyproj.Geod.fwd) ---
+    _section("UNIT TEST: geodesic bbox buffer and antimeridian split")
+
+    boxes = _expand_bbox_km(23.7, 37.9, 23.8, 38.0, 1.0)
+    assert len(boxes) == 1, boxes
+    west, south, east, north = boxes[0]
+    assert south < 37.9 and north > 38.0 and west < 23.7 and east > 23.8, boxes
+    # ~1 km is about 0.009 degrees of latitude
+    assert 37.9 - south < 0.02 and north - 38.0 < 0.02, boxes
+    print(f"  1 km buffer: {boxes[0]}")
+
+    split = _split_antimeridian_bbox(170.0, -10.0, -170.0, 10.0)
+    assert split == [
+        (170.0, -10.0, 180.0, 10.0),
+        (-180.0, -10.0, -170.0, 10.0),
+    ], split
+    print(f"  antimeridian split: {split}")
+    print("  [PASS] geodesic bbox helpers")
 
 
 # ---------------------------------------------------------------------------

@@ -8,3 +8,6 @@ python-dotenv>=1.0.0
 matplotlib>=3.8.0  # For compute_metrics time-series plots
 numpy>=1.24.0      # For local stats computation from ORBIT TIFFs
 tifffile>=2023.7.0 # Lightweight multi-band TIFF reader (depends on numpy)
+pyproj>=3.6.0      # WGS84 geodesic bbox expansion (Geod) and UTM Process API grid
+pandas>=2.2.0      # VRR recovery table (Lin et al. 2005)
+pillow>=10.0.0     # composite, burn-mask, and severity previews

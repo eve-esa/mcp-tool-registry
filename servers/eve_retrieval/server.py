@@ -106,7 +106,6 @@ async def retrieve(
     query: str,
     year: list[int] | None = None,
     filters: dict | None = None,
-    llm_type: str | None = None,
     embeddings_model: str = "Qwen/Qwen3-Embedding-4B",
     k: int = 5,
     temperature: float = 0.0,
@@ -125,9 +124,6 @@ async def retrieve(
         query: The search query.
         year: Optional year filter (list of integers).
         filters: Optional additional filters (free-form dict).
-        llm_type: LLM backend for query rewriting. Options include
-            'main', 'fallback', 'satcom_small', 'satcom_large', 'ship',
-            'eve_v05'. Defaults to the server default when None.
         embeddings_model: Embedding model for vector search.
         k: Number of documents to retrieve (0–10).
         temperature: Sampling temperature for the rewrite step (0.0–1.0).
@@ -156,8 +152,6 @@ async def retrieve(
         body["year"] = year
     if filters is not None:
         body["filters"] = filters
-    if llm_type is not None:
-        body["llm_type"] = llm_type
     if private_collections is not None:
         body["private_collections"] = private_collections
 
