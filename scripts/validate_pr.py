@@ -3,16 +3,19 @@ Validate a pull request against the MCP server monorepo conventions.
 
 Checks performed (exit code 1 on any failure):
     1. Single-server scope — PR touches at most one server directory
-    2. Required files      — server.py and requirements.txt exist
+    2. Required files      — server.py, requirements.txt and CITATION.cff exist
     3. No secrets          — no .env, .pem, .key, credentials committed
     4. Entrypoint schema   — server.py follows the AgentCore contract
     5. requirements.txt    — non-empty, all deps have version constraints
     6. .env.template       — only ${PLACEHOLDER} patterns, no leaked secrets
     7. File size guard     — no file exceeds MAX_FILE_SIZE_MB
     8. Hardcoded secrets   — scan source files for inline credentials
+    9. CITATION.cff        — valid Citation File Format 1.2.0
 
 Non-blocking checks (warnings only — do NOT fail the build):
-    9. Ruff lint           — run ruff on the server directory, report findings
+   10. README citation     — README.md generated section matches CITATION.cff
+                             (.github/workflows/sync-readmes.yml writes it after merge)
+   11. Ruff lint           — run ruff on the server directory, report findings
 
 Usage:
     python scripts/validate_pr.py                     # auto-detect via git diff
@@ -28,8 +31,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from citation import CFF_FILENAME, README_FILENAME, load_cff, render_readme, validate_cff
+
 MAX_FILE_SIZE_MB = 5
-REQUIRED_SERVER_FILES = ["server.py", "requirements.txt"]
+REQUIRED_SERVER_FILES = ["server.py", "requirements.txt", CFF_FILENAME]
 FORBIDDEN_FILE_PATTERNS = [
     "*.pem",
     "*.key",
@@ -385,6 +390,47 @@ def check_hardcoded_secrets(changed_files: list[str]) -> list[ValidationError]:
     return errors
 
 
+def check_citation(server_name: str) -> list[ValidationError]:
+    """Validate CITATION.cff against the official CFF 1.2.0 schema."""
+    cff_path = Path("servers") / server_name / CFF_FILENAME
+    if not cff_path.exists():
+        return []  # already caught by required-files check
+
+    try:
+        messages = validate_cff(load_cff(cff_path))
+    except ValueError as exc:
+        messages = [str(exc)]
+
+    return [
+        ValidationError("citation", f"{cff_path}: {message}")
+        for message in messages
+    ]
+
+
+def check_readme_citation(server_name: str) -> list[ValidationError]:
+    """Report when README.md's generated section does not match CITATION.cff."""
+    server_dir = Path("servers") / server_name
+    if check_citation(server_name) or not (server_dir / CFF_FILENAME).exists():
+        return []  # fix CITATION.cff first
+
+    readme = server_dir / README_FILENAME
+    current = readme.read_text(encoding="utf-8") if readme.exists() else None
+    try:
+        expected = render_readme(server_dir)
+    except ValueError as exc:
+        return [ValidationError("readme-citation", str(exc))]
+
+    if current == expected:
+        return []
+    state = "is missing" if current is None else "is out of date with CITATION.cff"
+    return [
+        ValidationError(
+            "readme-citation",
+            f"{readme} {state}. Run: python scripts/citation.py {server_dir}",
+        )
+    ]
+
+
 def check_server_startup(server_name: str) -> list[ValidationError]:
     """Verify the server can be imported without errors."""
     errors: list[ValidationError] = []
@@ -478,11 +524,16 @@ def main() -> None:
         all_errors.extend(check_entrypoint_schema(server_name))
         all_errors.extend(check_requirements_txt(server_name))
         all_errors.extend(check_env_template(server_name))
+        all_errors.extend(check_citation(server_name))
         all_errors.extend(check_server_startup(server_name))
 
     infra_files = has_infra_changes(changed_files)
     if infra_files:
         print(f"::warning::PR modifies shared infrastructure: {', '.join(infra_files)}")
+
+    for server_name in servers:
+        for warning in check_readme_citation(server_name):
+            print(f"::warning::{warning.message} (it is also written automatically after merge)")
 
     has_lint_warnings = False
     for server_name in servers:

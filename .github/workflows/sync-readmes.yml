@@ -1,0 +1,54 @@
+name: Sync server READMEs
+
+# Regenerates the Authors and Citation section of every servers/<name>/README.md
+# from its CITATION.cff after changes land on main.
+# Pushes made with GITHUB_TOKEN do not trigger other workflows, so this commit
+# does not redeploy servers:
+# https://docs.github.com/en/actions/concepts/security/github_token#when-github_token-triggers-workflow-runs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "servers/*/CITATION.cff"
+      - "servers/*/README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-readmes
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Regenerate READMEs
+        run: |
+          for cff in servers/*/CITATION.cff; do
+            python scripts/citation.py "$(dirname "$cff")"
+          done
+
+      - name: Commit and push
+        run: |
+          if [ -z "$(git status --porcelain -- servers)" ]; then
+            echo "All READMEs are up to date."
+            exit 0
+          fi
+          git add servers/*/README.md
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898283+github-actions[bot]@users.noreply.github.com" \
+              commit -m "docs: sync server READMEs with CITATION.cff"
+          git pull --rebase origin main
+          git push origin HEAD:main

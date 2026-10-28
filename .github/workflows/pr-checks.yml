@@ -64,6 +64,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install validation dependencies
+        run: pip install -r scripts/requirements.txt
+
       - name: Install server dependencies
         env:
           CHANGED_SERVERS: ${{ needs.detect-changes.outputs.servers }}

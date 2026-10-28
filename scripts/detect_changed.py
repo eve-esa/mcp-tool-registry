@@ -23,6 +23,9 @@ from pathlib import Path
 # Servers with a dedicated workflow; omitted from the generic deploy.yml matrix.
 GENERIC_DEPLOY_EXCLUDE = frozenset({"eve_retrieval"})
 
+# Files that do not affect the running server; changing only these skips deploy.
+NON_DEPLOY_FILES = frozenset({"README.md", "CITATION.cff"})
+
 
 def get_changed_files(base_ref: str = "HEAD~1") -> list[str]:
     result = subprocess.run(
@@ -38,6 +41,8 @@ def extract_server_names(changed_files: list[str]) -> list[str]:
     servers = set()
     for filepath in changed_files:
         parts = Path(filepath).parts
+        if len(parts) == 3 and parts[2] in NON_DEPLOY_FILES:
+            continue
         if len(parts) >= 2 and parts[0] == "servers":
             server_name = parts[1]
             server_dir = Path("servers") / server_name
