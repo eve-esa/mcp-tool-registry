@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "servers/eve_retrieval/**"
+      - "!servers/eve_retrieval/README.md"
+      - "!servers/eve_retrieval/CITATION.cff"
       - "shared/**"
       - "scripts/deploy_server.py"
       - ".github/workflows/deploy-eve-retrieval.yml"
