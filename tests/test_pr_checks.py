@@ -21,12 +21,15 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from citation import BEGIN_MARKER, END_MARKER, render_readme  # noqa: E402, I001
 from validate_pr import (  # noqa: E402, I001
+    check_citation,
     check_entrypoint_schema,
     check_env_template,
     check_file_sizes,
     check_hardcoded_secrets,
     check_no_secrets,
+    check_readme_citation,
     check_requirements_txt,
     check_required_files,
     check_single_server,
@@ -49,6 +52,21 @@ VALID_SERVER_PY = textwrap.dedent("""\
 
 VALID_REQUIREMENTS = "mcp[cli]>=1.2.0\nhttpx>=0.27.0\n"
 
+VALID_CITATION = textwrap.dedent("""\
+    cff-version: 1.2.0
+    message: If you use this MCP server, please cite it using the metadata from this file.
+    title: Test Server
+    abstract: A server used in tests.
+    date-released: 2026-10-28
+    authors:
+      - given-names: Jane
+        family-names: Doe
+        alias: janedoe
+        affiliation: Example University
+        orcid: https://orcid.org/0000-0002-1825-0097
+      - name: Example Lab
+""")
+
 
 @pytest.fixture()
 def server_dir(tmp_path: Path):
@@ -62,6 +80,7 @@ def server_dir(tmp_path: Path):
     sdir.mkdir(parents=True)
     (sdir / "server.py").write_text(VALID_SERVER_PY)
     (sdir / "requirements.txt").write_text(VALID_REQUIREMENTS)
+    (sdir / "CITATION.cff").write_text(VALID_CITATION)
 
     import os
     orig = os.getcwd()
@@ -138,11 +157,17 @@ class TestRequiredFiles:
         errors = check_required_files("test-server")
         assert any("requirements.txt" in e.message for e in errors)
 
-    def test_both_missing(self, server_dir: Path):
+    def test_missing_citation(self, server_dir: Path):
+        (server_dir / "CITATION.cff").unlink()
+        errors = check_required_files("test-server")
+        assert any("CITATION.cff" in e.message for e in errors)
+
+    def test_all_missing(self, server_dir: Path):
         (server_dir / "server.py").unlink()
         (server_dir / "requirements.txt").unlink()
+        (server_dir / "CITATION.cff").unlink()
         errors = check_required_files("test-server")
-        assert len(errors) == 2
+        assert len(errors) == 3
 
 
 # ─── 3. No secrets (file-level) ────────────────────────────────────────
@@ -504,7 +529,92 @@ class TestRuffLint:
         assert run_ruff_lint("test-server") is True
 
 
-# ─── 12. Valid servers pass all checks (integration) ────────────────────
+# ─── 12. CITATION.cff ───────────────────────────────────────────────────
+
+
+class TestCitation:
+    def test_valid_passes(self, server_dir: Path):
+        assert check_citation("test-server") == []
+
+    def test_missing_file_skipped(self, server_dir: Path):
+        (server_dir / "CITATION.cff").unlink()
+        assert check_citation("test-server") == []
+
+    def test_missing_authors(self, server_dir: Path):
+        bad = VALID_CITATION.split("authors:")[0]
+        (server_dir / "CITATION.cff").write_text(bad)
+        errors = check_citation("test-server")
+        assert any("authors" in e.message for e in errors)
+
+    def test_unknown_key_rejected(self, server_dir: Path):
+        (server_dir / "CITATION.cff").write_text(VALID_CITATION + "tags: [eo]\n")
+        errors = check_citation("test-server")
+        assert any("tags" in e.message for e in errors)
+
+    def test_bad_orcid_rejected(self, server_dir: Path):
+        bad = VALID_CITATION.replace(
+            "https://orcid.org/0000-0002-1825-0097", "0000-0002-1825-0097"
+        )
+        (server_dir / "CITATION.cff").write_text(bad)
+        errors = check_citation("test-server")
+        assert any("orcid" in e.message for e in errors)
+
+    def test_invalid_yaml_rejected(self, server_dir: Path):
+        (server_dir / "CITATION.cff").write_text("title: [unclosed\n")
+        errors = check_citation("test-server")
+        assert any("invalid YAML" in e.message for e in errors)
+
+
+# ─── 13. README generated from CITATION.cff ─────────────────────────────
+
+
+class TestReadmeCitation:
+    def test_missing_readme_fails(self, server_dir: Path):
+        errors = check_readme_citation("test-server")
+        assert len(errors) == 1
+        assert "is missing" in errors[0].message
+
+    def test_generated_readme_passes(self, server_dir: Path):
+        (server_dir / "README.md").write_text(render_readme(server_dir))
+        assert check_readme_citation("test-server") == []
+
+    def test_generated_readme_content(self, server_dir: Path):
+        readme = render_readme(server_dir)
+        assert readme.startswith("# Test Server\n\nA server used in tests.\n")
+        assert "[@janedoe](https://github.com/janedoe)" in readme
+        assert "Example University" in readme
+        assert "[ORCID](https://orcid.org/0000-0002-1825-0097)" in readme
+        assert "**Example Lab**" in readme
+
+    def test_existing_readme_gets_block_appended(self, server_dir: Path):
+        (server_dir / "README.md").write_text("# My Server\n\nHand-written docs.\n")
+        readme = render_readme(server_dir)
+        assert readme.startswith("# My Server\n\nHand-written docs.\n\n" + BEGIN_MARKER)
+        assert readme.endswith(END_MARKER + "\n")
+
+    def test_existing_block_replaced_in_place(self, server_dir: Path):
+        stale = f"# My Server\n\n{BEGIN_MARKER}\nold authors\n{END_MARKER}\n\n## Footer\n"
+        (server_dir / "README.md").write_text(stale)
+        readme = render_readme(server_dir)
+        assert "old authors" not in readme
+        assert readme.endswith(END_MARKER + "\n\n## Footer\n")
+        assert readme.count(BEGIN_MARKER) == 1
+
+    def test_stale_readme_fails(self, server_dir: Path):
+        (server_dir / "README.md").write_text(render_readme(server_dir))
+        new = VALID_CITATION.replace("Jane", "Janet")
+        (server_dir / "CITATION.cff").write_text(new)
+        errors = check_readme_citation("test-server")
+        assert len(errors) == 1
+        assert "out of date" in errors[0].message
+
+    def test_regeneration_is_idempotent(self, server_dir: Path):
+        (server_dir / "README.md").write_text("# My Server\n")
+        (server_dir / "README.md").write_text(render_readme(server_dir))
+        assert render_readme(server_dir) == (server_dir / "README.md").read_text()
+
+
+# ─── 14. Valid servers pass all checks (integration) ────────────────────
 
 
 class TestValidServerIntegration:
@@ -521,6 +631,7 @@ class TestValidServerIntegration:
         assert check_env_template("test-server") == []
         assert check_file_sizes(files) == []
         assert check_hardcoded_secrets(files) == []
+        assert check_citation("test-server") == []
 
 
 # ─── Run standalone ─────────────────────────────────────────────────────

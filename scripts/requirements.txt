@@ -1,0 +1,3 @@
+# Dependencies for scripts/validate_pr.py and scripts/citation.py
+jsonschema>=4.20.0
+pyyaml>=6.0

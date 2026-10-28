@@ -22,9 +22,11 @@ This repository is a monorepo of [Model Context Protocol](https://modelcontextpr
     deploy.yml          # Deploys servers to AgentCore on push to main
     pr-checks.yml       # Validates PRs before merge
 scripts/
+    citation.py         # Validates CITATION.cff and generates the README citation section
     deploy_server.py    # Build + deploy logic (used by CI)
     detect_changed.py   # Detects which servers changed in a push
     validate_pr.py      # PR validation checks
+    schemas/            # Official CFF 1.2.0 JSON Schema
 shared/
     Dockerfile          # Shared Dockerfile for all servers
 servers/
@@ -41,6 +43,8 @@ Each server directory contains:
 |------|----------|---------|
 | `server.py` | Yes | FastMCP entrypoint — the only file the container runs |
 | `requirements.txt` | Yes | pip dependencies with version constraints |
+| `CITATION.cff` | Yes | Authors and citation metadata in [Citation File Format](https://citation-file-format.github.io/) 1.2.0 |
+| `README.md` | Yes | Server docs; its Authors and Citation section is generated from `CITATION.cff` |
 | `.env.template` | No | Secret placeholders; CI substitutes them at deploy time |
 | `test.py` | No (recommended) | Local test script |
 
@@ -125,6 +129,12 @@ httpx>=0.27.0
 python-dotenv>=1.0.0
 ```
 
+Add your attribution in `servers/my-server/CITATION.cff` (see [step 5](#5-add-citationcff-attribution)) and generate the README:
+
+```bash
+python scripts/citation.py servers/my-server
+```
+
 Then test locally, build Docker, and open a PR. The rest of this guide explains each piece in detail.
 
 ---
@@ -198,11 +208,60 @@ MY_API_URL=https://api.example.com
 
 Never put actual secret values in this file. See [Secrets and Environment Variables](#secrets-and-environment-variables) for how to get them added.
 
-### 5. Write `test.py` (recommended)
+### 5. Add `CITATION.cff` (attribution)
+
+Every server credits its authors in a `CITATION.cff` file written in [Citation File Format (CFF) 1.2.0](https://github.com/citation-file-format/citation-file-format/blob/1.2.0/schema-guide.md). It is plain YAML that both people and tools can read. We use it to credit you in the server README and, later, in the registry UI. See `servers/effis/CITATION.cff` for a real example.
+
+```yaml
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: My Server
+abstract: >-
+  One paragraph on what the server does. It becomes the README introduction
+  when no README exists yet.
+authors:
+  - given-names: Jane
+    family-names: Doe
+    alias: janedoe                                  # your GitHub username
+    affiliation: University of Somewhere
+    orcid: https://orcid.org/0000-0002-1825-0097    # optional, full URL
+    email: jane.doe@example.org                     # optional
+    website: https://janedoe.dev                    # optional
+  - name: Example Lab                               # organisations use `name`
+keywords:
+  - earth-observation
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/my-server
+```
+
+Rules:
+
+- `cff-version`, `message`, `title`, and at least one entry in `authors` are required.
+- List every person who should be credited, in the order you want them shown. Use `alias` for your GitHub username so the README links to your profile.
+- If the server implements a paper, add it under [`preferred-citation`](https://github.com/citation-file-format/citation-file-format/blob/1.2.0/schema-guide.md#preferred-citation). The README then asks users to cite that paper.
+- Only keys defined by CFF are allowed. CI rejects unknown keys and badly formatted values, such as an ORCID without `https://orcid.org/`.
+- The [cffinit](https://citation-file-format.github.io/cffinit/) web form can generate the file for you.
+
+### 6. Generate `README.md`
+
+The README's Authors and Citation section is generated from `CITATION.cff`:
+
+```bash
+python scripts/citation.py servers/my-server
+```
+
+- If `README.md` does not exist, the script creates it from the CFF `title` and `abstract`, followed by the generated section.
+- If you already wrote a `README.md`, the script appends the generated section at the end. Your text is never changed.
+- The section sits between `<!-- BEGIN GENERATED CITATION ... -->` and `<!-- END GENERATED CITATION -->` markers. Do not edit it by hand. Edit `CITATION.cff` and run the script again; it replaces only what is between the markers.
+
+CI fails when the README is missing or out of date with `CITATION.cff`. Check locally with `python scripts/citation.py servers/my-server --check`. The scripts need `pip install -r scripts/requirements.txt`.
+
+### 7. Write `test.py` (recommended)
 
 Create a test script that imports your tools and exercises them locally. See `servers/eve_retrieval/test.py` for an example.
 
-### 6. Test locally
+### 8. Test locally
 
 ```bash
 # stdio mode (for Cursor, Claude Desktop, etc.)
@@ -215,7 +274,7 @@ python server.py --transport http
 curl http://localhost:8000/mcp
 ```
 
-### 7. Test the Docker build
+### 9. Test the Docker build
 
 ```bash
 # From the repository root
@@ -224,7 +283,7 @@ docker build -f shared/Dockerfile servers/my-server/
 
 This uses the same Dockerfile that CI uses. If it builds locally, it will build in CI.
 
-### 8. Submit your PR
+### 10. Submit your PR
 
 Create a branch, commit your server directory, and open a PR against `main`. The automated checks will run and report any issues.
 
@@ -431,7 +490,9 @@ Every PR is validated automatically. Here is the full set of rules at a glance:
 | Rule | What CI checks |
 |------|---------------|
 | One server per PR | Changed files must touch at most one `servers/<name>/` directory |
-| Required files | `server.py` and `requirements.txt` must exist |
+| Required files | `server.py`, `requirements.txt`, and `CITATION.cff` must exist |
+| Citation metadata | `CITATION.cff` must be valid against the official CFF 1.2.0 schema |
+| README citation | `README.md` must exist and its generated section must match `CITATION.cff` |
 | Entrypoint contract | `FastMCP(host="0.0.0.0", port=8000, stateless_http=True)` and `mcp.run(transport="streamable-http")` |
 | Version constraints | Every line in `requirements.txt` must have `>=`, `==`, etc. |
 | No secrets in files | `.env` files, `*.pem`, `*.key`, `credentials.json`, `token.json` are blocked |
@@ -449,6 +510,8 @@ Copy this checklist into your PR description:
 - [ ] PR modifies only one server directory under `servers/`
 - [ ] `server.py` follows the entrypoint contract (FastMCP settings + streamable-http transport)
 - [ ] `requirements.txt` exists and all dependencies have version constraints
+- [ ] `CITATION.cff` lists all authors and is valid CFF 1.2.0
+- [ ] `README.md` regenerated with `python scripts/citation.py servers/my-server`
 - [ ] No `.env` files, credentials, or keys committed (only `.env.template`)
 - [ ] No hardcoded secrets in source code (use `os.environ` / `os.getenv`)
 - [ ] `.env.template` uses `${PLACEHOLDER}` syntax for secrets (if applicable)
