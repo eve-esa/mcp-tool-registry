@@ -187,6 +187,52 @@ def _tool_error(error_type: str, error: str, **extra) -> str:
     return json.dumps(payload)
 
 
+def _artifact_path(value: str | None = None, *, existing: bool = False) -> Path:
+    """All caller-controlled diagnostic paths stay under the operator's root."""
+    root = DEFAULT_SAVE_DIR.expanduser().resolve()
+    if value is not None and "://" in str(value):
+        raise ValueError("URLs are not server-local artifact references")
+    path = Path(value).expanduser() if value is not None else root
+    path = path.resolve(strict=existing)
+    if not path.is_relative_to(root):
+        raise ValueError("Artifact reference escapes the configured artifact root")
+    return path
+
+
+def _bounded_perimeter(feature: dict) -> dict:
+    """Bounded WGS84 GeoJSON input, not proof of EFFIS provenance."""
+    from shapely.geometry import shape
+
+    if not isinstance(feature, dict) or feature.get("type") != "Feature" or feature.get("crs"):
+        raise ValueError("Supply one WGS84 GeoJSON Feature")
+    if feature.get("properties") is not None and not isinstance(feature["properties"], dict):
+        raise ValueError("Feature properties must be an object or null")
+    if len(json.dumps(feature, allow_nan=False).encode()) > 256_000:
+        raise ValueError("Perimeter exceeds 256000 bytes")
+    geometry = feature.get("geometry", {})
+    if geometry.get("type") not in {"Polygon", "MultiPolygon"} or geometry.get("crs"):
+        raise ValueError("Perimeter must be a WGS84 Polygon or MultiPolygon")
+    polygons = [geometry["coordinates"]] if geometry["type"] == "Polygon" else geometry["coordinates"]
+    vertices = 0
+    for polygon in polygons:
+        for ring in polygon:
+            if len(ring) < 4 or ring[0] != ring[-1]:
+                raise ValueError("Polygon rings must be closed and have at least four positions")
+            vertices += len(ring)
+            for point in ring:
+                if len(point) != 2 or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                                          or not math.isfinite(v) for v in point):
+                    raise ValueError("Coordinates must be finite longitude/latitude pairs")
+                if not (-180 <= point[0] <= 180 and -80 < point[1] < 84):
+                    raise ValueError("Perimeter outside supported WGS84 bounds")
+    if vertices > 10_000:
+        raise ValueError("Perimeter exceeds 10000 vertices")
+    polygon = shape(geometry)
+    if polygon.is_empty or not polygon.is_valid or polygon.bounds[2] - polygon.bounds[0] >= 6:
+        raise ValueError("Invalid or excessively wide perimeter")
+    return {**feature, "properties": feature.get("properties") or {}}
+
+
 # Axis-aligned lon/lat width scales with cos(latitude); warn above this.
 _BBOX_HIGH_LAT = 70.0
 _BBOX_VALIDITY = (
@@ -639,6 +685,7 @@ async def get_effis_burnt_areas(
     buffer_km: float = 5.0,
     save_dir: str | None = None,
     shapefile_dir: str | None = None,
+    include_perimeter: bool = False,
 ) -> str:
     """
     Detect burnt areas from EFFIS and return per-fire bboxes + metadata.
@@ -646,7 +693,12 @@ async def get_effis_burnt_areas(
     Fetches burnt area polygons from EFFIS, saves the full GeoJSON to disk,
     and returns a compact list of fires sorted by area (largest first).
     Each fire entry includes a bbox string ready to pass directly to
-    compute_metrics or other downstream tools.
+    compute_metrics or other downstream tools. With include_perimeter=True,
+    request max_features=1: one bounded GeoJSON Feature is returned inline,
+    without a file handoff. Bounds: 256000 bytes, 10000 vertices per Feature.
+    Requests allow 1–500 features and 0–100 km buffer. Caller artifact/cache
+    overrides must stay beneath operator-configured roots. Legacy saved paths
+    are server-local diagnostics, not download URLs or persistence guarantees.
 
     Workflow:
         1. Call get_effis_burnt_areas(date=...) → fires with bboxes
@@ -684,6 +736,35 @@ async def get_effis_burnt_areas(
         cross the antimeridian also include ``bboxes`` and
         ``antimeridian_split``.
     """
+
+    # Guard producer paths even for inline requests; overrides are not authority.
+    try:
+        out_dir = _artifact_path(save_dir)
+        if shapefile_dir is not None and (
+            not EFFIS_SHAPEFILE_DIR or not Path(shapefile_dir).expanduser().resolve().is_relative_to(
+                Path(EFFIS_SHAPEFILE_DIR).expanduser().resolve()
+            )
+        ):
+            raise ValueError("Cache override escapes the operator-configured cache root")
+    except (OSError, ValueError):
+        return _tool_error("invalid_path", "Use operator-configured artifact/cache roots")
+    try:
+        west, south, east, north = [float(v) for v in bbox.split(",")]
+        if not all(math.isfinite(v) for v in (west, south, east, north)) or not (
+            -180 <= west < east <= 180 and -90 <= south < north <= 90
+        ):
+            raise ValueError("Invalid bbox")
+        if not 1 <= max_features <= 500 or not math.isfinite(buffer_km) or not 0 <= buffer_km <= 100:
+            raise ValueError("Request exceeds documented limits")
+        if include_perimeter and max_features != 1:
+            raise ValueError("Inline perimeter requires max_features=1")
+        if date and date.strip().lower() not in {"today", "week", "month"}:
+            value = date.strip()
+            fmt = {4: "%Y", 7: "%Y-%m", 10: "%Y-%m-%d"}.get(len(value))
+            if not fmt or datetime.strptime(value, fmt).strftime(fmt) != value:
+                raise ValueError("Use an ISO date prefix")
+    except (ValueError, TypeError):
+        return _tool_error("invalid_input", "Use finite bbox/buffer, 1–500 features, valid date; inline requires 1 feature")
 
     # Resolve date shortcuts and build WFS params
     wfs_layer = "ms:modis.ba.poly"
@@ -875,18 +956,20 @@ async def get_effis_burnt_areas(
 
         # Save full GeoJSON to file (keeps verbose polygon coordinates out
         # of the tool response that the model sees).
-        out_dir = Path(save_dir) if save_dir else DEFAULT_SAVE_DIR
-        out_dir.mkdir(parents=True, exist_ok=True)
-        filepath = out_dir / f"burnt_areas_{date_label}_{_bbox_hash8(bbox, str(max_features))}.geojson"
-        filepath.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+        if not include_perimeter:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            filepath = out_dir / f"burnt_areas_{date_label}_{_bbox_hash8(bbox, str(max_features))}.geojson"
+            filepath = _artifact_path(str(filepath))
+            filepath.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+            result["saved_geojson"] = str(filepath)
+            result["artifact_scope"] = "server-local only; not a download URL or persistence guarantee"
 
         result["total_features"] = n_features
-        result["saved_geojson"] = str(filepath)
 
         # Extract per-fire bounding boxes with metadata (sorted by area,
         # largest first). Each bbox is ready to pass to compute_metrics.
         fires = []
-        for feat in features:
+        for feature_index, feat in enumerate(features):
             props = feat.get("properties", {})
             geom = feat.get("geometry")
             if not geom:
@@ -914,7 +997,10 @@ async def get_effis_burnt_areas(
                 min(all_lons), min(all_lats), max(all_lons), max(all_lats),
                 buffer_km,
             ))
+            if include_perimeter:
+                rec["perimeter"] = _bounded_perimeter(feat)
             rec.update({
+                "feature_index": feature_index,
                 "area_ha": area_ha,
                 "commune": props.get("COMMUNE", props.get("PROVINCE", "")),
                 "country": props.get("COUNTRY", ""),
@@ -928,6 +1014,7 @@ async def get_effis_burnt_areas(
 
     except Exception as exc:
         result["geojson_error"] = str(exc)
+        result.update(ok=False, error_type="lookup_unavailable", error="EFFIS result could not be obtained/validated")
 
     return json.dumps(result, default=str)
 
@@ -1960,6 +2047,10 @@ async def compute_metrics(
     if recovery_months is None:
         recovery_months = [12, 24, 36, 48]
 
+    try:
+        out_dir = _artifact_path(save_dir)
+    except (OSError, ValueError):
+        return _tool_error("invalid_path", "Use the operator-configured artifact root")
     cdse_cid, cdse_csec = _resolve_cdse_creds()
     if not cdse_cid or not cdse_csec:
         return _tool_error(
@@ -2036,7 +2127,6 @@ async def compute_metrics(
         "plots": {}, "summary": {},
     }
 
-    out_dir = Path(save_dir) if save_dir else Path(DEFAULT_SAVE_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
     series_dir = out_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"
 
@@ -2550,8 +2640,175 @@ async def compute_metrics(
     return json.dumps(compact, default=str)
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Mapped exposure
 # ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_fire_exposure(
+    geojson_path: str | None = None, feature_index: int = 0, refresh: bool = False,
+    perimeter: dict | None = None, export: bool | None = None,
+) -> str:
+    """Current OSM mapped exposure, not damage/population or historical inventory.
+
+    Prefer one inline WGS84 GeoJSON Feature (256000 bytes / 10000 vertices).
+    Legacy file/index references must belong to DEFAULT_SAVE_DIR, are ephemeral,
+    and are not download URLs. Bbox: <6 degrees wide, <=2500 km², latitude -80..84.
+    Inline JSON needs no files; export=True enables optional local diagnostics.
+    Building ways only; relation-only/unmapped assets and enclosing ways may be absent.
+    """
+    from collections import Counter
+
+    from pyproj import Transformer
+    from shapely.geometry import LineString, Point, Polygon, box, mapping, shape
+    from shapely.ops import transform
+
+    path = None
+    try:
+        if (perimeter is None) == (geojson_path is None):
+            raise ValueError("Supply either perimeter or a server-local geojson_path")
+        if geojson_path is not None:
+            path = _artifact_path(geojson_path, existing=True)
+            if path.suffix.lower() != ".geojson" or path.stat().st_size > 25_000_000:
+                raise ValueError("Invalid or oversized GeoJSON file")
+            document = json.loads(path.read_text())
+            if document.get("type") != "FeatureCollection" or document.get("crs"):
+                raise ValueError("Supply a WGS84 FeatureCollection")
+            if isinstance(feature_index, bool) or not 0 <= feature_index < len(document["features"]):
+                raise ValueError("Invalid feature index")
+            perimeter = document["features"][feature_index]
+        feature = _bounded_perimeter(perimeter)
+        geometry = shape(feature["geometry"])
+        west, south, east, north = geometry.bounds
+        zone = min(60, int(((west + east) / 2 + 180) / 6) + 1)
+        epsg = (32600 if south + north >= 0 else 32700) + zone
+        project = Transformer.from_crs(4326, epsg, always_xy=True).transform
+        unproject = Transformer.from_crs(epsg, 4326, always_xy=True).transform
+        burn = transform(project, geometry)
+        if transform(project, box(west, south, east, north)).area > 2_500_000_000:
+            return _tool_error("area_too_large", "Perimeter bbox must be at most 2500 km²")
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError):
+        return _tool_error("invalid_perimeter", "Supply a bounded WGS84 Feature or confined valid file/index")
+
+    query = (f'[out:json][timeout:60];(way["building"]({south},{west},{north},{east});'
+             f'way["highway"]({south},{west},{north},{east});'
+             f'node["place"]["name"]({south},{west},{north},{east}););out geom;')
+    export = bool(path) if export is None else export
+    prefix = path.with_name(f"{path.stem}_feature_{feature_index}_exposure") if path else (
+        DEFAULT_SAVE_DIR / ("exposure_" + hashlib.sha256(json.dumps(feature).encode()).hexdigest()[:16]))
+    warnings, cached, data = [], False, None
+    if path and not refresh:
+        try:
+            snapshot = _artifact_path(str(prefix.with_suffix(".osm.json")), existing=True)
+            saved = json.loads(snapshot.read_text()) if snapshot.stat().st_size <= 25_000_000 else {}
+            if saved.get("query") == query:
+                data, cached = saved["data"], True
+        except (OSError, ValueError, KeyError):
+            pass
+    try:
+        if data is None:
+            response = await _http_get("https://overpass-api.de/api/interpreter", params={"data": query})
+            if len(response.content) > 25_000_000:
+                raise ValueError("Oversized Overpass response")
+            data = response.json()
+        if data.get("remark") or not isinstance(data.get("elements"), list):
+            raise ValueError("Incomplete Overpass response")
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        return _tool_error("overpass_unavailable", "No exposure counts computed: OSM data unavailable/incomplete")
+
+    assets, places, roads, buildings, skipped = [], [], Counter(), 0, 0
+    for element in data["elements"]:
+        try:
+            tags = element.get("tags", {})
+            if element["type"] == "node":
+                if tags.get("place") not in {"city", "town", "village", "hamlet", "suburb"} or not tags.get("name"):
+                    continue
+                geom, kind = Point(element["lon"], element["lat"]), "place"
+            else:
+                coords = [(p["lon"], p["lat"]) for p in element["geometry"]]
+                if "building" in tags and tags["building"] != "no":
+                    if len(coords) < 4 or coords[0] != coords[-1]:
+                        raise ValueError("Incomplete building way")
+                    geom, kind = Polygon(coords), "building"
+                elif "highway" in tags:
+                    geom, kind = LineString(coords), "road"
+                else:
+                    continue
+            if geom.is_empty or not geom.is_valid:
+                raise ValueError("Invalid OSM geometry")
+            clipped = transform(project, geom).intersection(burn)
+            if clipped.is_empty:
+                continue
+            if kind == "building" and clipped.area > 0:
+                buildings += 1
+            elif kind == "road" and clipped.length > 0:
+                roads[tags["highway"]] += clipped.length
+            elif kind == "place":
+                places.append({"name": tags["name"], "place": tags["place"], "osm_id": element["id"]})
+            else:
+                continue
+            assets.append({"type": "Feature", "geometry": mapping(transform(unproject, clipped)),
+                           "properties": {"kind": kind, "osm_id": element["id"], "name": tags.get("name", ""),
+                                          "highway": tags.get("highway")}})
+        except (KeyError, TypeError, ValueError):
+            skipped += 1
+
+    artifacts = {}
+    if export:
+        try:
+            import matplotlib.pyplot as plt
+
+            prefix = _artifact_path(str(prefix))
+            prefix.parent.mkdir(parents=True, exist_ok=True)
+            for suffix, content in [(".geojson", {"type": "FeatureCollection", "features": assets}),
+                                    (".osm.json", {"query": query, "data": data})]:
+                target = _artifact_path(str(prefix.with_suffix(suffix)))
+                target.write_text(json.dumps(content))
+            fig, ax = plt.subplots(figsize=(9, 7))
+
+            def draw(geom, color):
+                if hasattr(geom, "geoms"):
+                    for part in geom.geoms:
+                        draw(part, color)
+                elif geom.geom_type == "Polygon":
+                    draw(geom.boundary, color)
+                elif geom.geom_type == "Point":
+                    ax.plot(geom.x, geom.y, ".", color=color)
+                else:
+                    ax.plot(*geom.xy, color=color, linewidth=0.7)
+
+            draw(burn, "firebrick")
+            for asset in assets:
+                draw(transform(project, shape(asset["geometry"])),
+                     {"building": "darkorange", "road": "steelblue", "place": "black"}[asset["properties"]["kind"]])
+            ax.set(aspect="equal", title="Mapped OSM exposure, not damage", xlabel="Easting (m)", ylabel="Northing (m)")
+            fig.text(0.01, 0.01, "© OpenStreetMap contributors (ODbL); supplied perimeter", fontsize=7)
+            image = _artifact_path(str(prefix.with_suffix(".png")))
+            try:
+                fig.savefig(image, dpi=130, bbox_inches="tight")
+            finally:
+                plt.close(fig)
+            artifacts = {"map_path": str(image), "geojson_path": str(prefix.with_suffix(".geojson")),
+                         "artifact_scope": "server-local only; not a URL or persistence guarantee"}
+        except (OSError, ValueError):
+            warnings.append("Local diagnostic export unavailable; JSON statistics remain valid")
+    centroid = transform(unproject, burn.centroid)
+    return json.dumps({
+        "ok": True, "source": "OpenStreetMap / Overpass", "feature_index": feature_index,
+        "fire_date": feature.get("properties", {}).get("FIREDATE"),
+        "perimeter_source": "caller-supplied GeoJSON; provenance not independently authenticated",
+        "centroid": {"latitude": centroid.y, "longitude": centroid.x},
+        "building_way_count": buildings, "road_km": sum(roads.values()) / 1000,
+        "road_km_by_class": {k: v / 1000 for k, v in sorted(roads.items())},
+        "named_place_point_count": len(places), "places": sorted(places, key=lambda p: p["name"]),
+        "skipped_geometries": skipped, "osm_timestamp": data.get("osm3s", {}).get("timestamp_osm_base"),
+        "cached_osm": cached, **artifacts,
+        "warnings": warnings + ["Current mapped overlap is not damage or historical asset completeness.",
+                                "Building ways only; relation-only/unmapped/enclosing ways may be missing.",
+                                "Place points are labels, not population or settlement footprints.",
+                                f"Skipped {skipped} invalid/incomplete geometries."],
+        "attribution": "© OpenStreetMap contributors, ODbL: https://www.openstreetmap.org/copyright",
+    }, allow_nan=False)
+
 
 if __name__ == "__main__":
     import argparse

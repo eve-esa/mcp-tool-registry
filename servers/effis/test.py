@@ -62,10 +62,15 @@ def _section(title: str) -> None:
 
 
 def _print_result(result) -> dict | None:
-    """Pretty-print a tool result and return the parsed JSON."""
+    """Validate before printing: failed tools must fail the integration check."""
+    assert not result.isError, "MCP tool returned isError"
     try:
         text = result.content[0].text
         parsed = json.loads(text)
+        assert isinstance(parsed, dict), "Expected a JSON object"
+        assert not parsed.get("error") and not parsed.get("geojson_error") and parsed.get("ok") is not False, (
+            "Tool reported failure: " + str(parsed.get("error_type", "tool_error"))
+        )
         print(json.dumps(parsed, indent=2, default=str)[:3000])
         if len(json.dumps(parsed)) > 3000:
             print("  ... (truncated)")
