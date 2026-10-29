@@ -67,8 +67,8 @@ Tools:
     my_tool — description of the tool
 
 Usage:
-    python server.py                              # stdio transport
-    python server.py --transport http --port 8000  # HTTP transport
+    python server.py                                          # stdio transport
+    python server.py --transport streamable-http --port 8000  # HTTP transport
 
 Requirements:
     pip install "mcp[cli]>=1.2.0" httpx python-dotenv
@@ -110,8 +110,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="My Server")
     parser.add_argument(
         "--transport",
-        choices=["stdio", "http"],
-        default="http",
+        choices=["stdio", "streamable-http"],
+        default="streamable-http",
+        help="Transport type (default: streamable-http)",
     )
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
@@ -268,7 +269,7 @@ cd servers/my-server
 python server.py --transport stdio
 
 # HTTP mode (for curl testing)
-python server.py --transport http
+python server.py --transport streamable-http
 # Then in another terminal:
 curl http://localhost:8000/mcp
 ```
@@ -298,16 +299,18 @@ If you use Cursor or Claude Desktop, add the server to your MCP client config po
 
 ```bash
 cd servers/my-server
-python server.py --transport http
+python server.py --transport streamable-http
 
 # List tools
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}'
 
 # Call a tool
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "my_tool", "arguments": {"query": "test"}}, "id": 2}'
 ```
 
@@ -359,6 +362,7 @@ curl -X POST https://<agentcore-url>/mcp \
   -H "X-CDSE-Client-Id: my-cdse-client-id" \
   -H "X-CDSE-Client-Secret: my-cdse-secret" \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"compute_metrics","arguments":{...}},"id":1}'
 ```
 
