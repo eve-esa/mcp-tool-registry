@@ -103,6 +103,31 @@ def provider(request):
                 payload["hourly"][key] = [v if h >= "2021-08-03" else 0
                                            for v, h in zip(payload["hourly"][key], hours, strict=True)]
         return httpx.Response(200, json=payload)
+    if request.url.host == "planetarycomputer.microsoft.com":
+        if request.url.path.endswith("/search"):
+            query = json.loads(request.content)
+            collection, bounds = query["collections"][0], query["bbox"]
+            ids = ["fixture_2020_tile", "fixture_2021_tile"] if collection == "esa-worldcover" else ["modis_2021_08"]
+            if case == "stac-partial":
+                bounds[2] = (bounds[0] + bounds[2]) / 2
+            if case == "stac-overlap":
+                ids.append("extra_2020_tile" if collection == "esa-worldcover" else "extra_modis_tile")
+            features = [] if case == "stac-empty" else [{"id": name, "bbox": bounds} for name in ids]
+            return httpx.Response(200, json={"features": features, "links":
+                [{"rel": "next", "href": "https://example.invalid/untrusted"}] if case == "stac-next" else []})
+        if request.url.path.endswith("/statistics"):
+            if case == "stats-rejected":
+                return httpx.Response(400, json={"error": {"message": "Asset ingestion source not registered"}})
+            is_cover = request.url.params["collection"] == "esa-worldcover"
+            histogram = [[50, 50], [30, 40]] if is_cover else [[80, 20], [0, 215]]
+            if case == "modis-zero" and not is_cover:
+                histogram = [[100], [0]]
+            if case == "stats-empty":
+                histogram = [[0, 0], [30, 40]] if is_cover else [[0, 0], [0, 215]]
+            if case == "stats-negative":
+                histogram[0][0] = -1
+            return httpx.Response(200, json={"properties": {"statistics": {"map": {
+                "histogram": histogram, "valid_percent": 50 if case == "stats-missing" else 100}}}})
     raise AssertionError(f"Unconfigured provider: {request.url.host}")
 
 
@@ -268,6 +293,61 @@ async def checks(transport):
             assert invalid.get("ok") is False and invalid["error_type"].startswith("invalid_"), invalid
         invalid = await call(client, "get_smoke_signal", bbox="nan,0,1,1", fire_date="2021-08-03")
         assert invalid.get("ok") is False
+        estimate = await call(client, "estimate_fire_emissions", burned_area_ha=10, bbox="23.2,38.7,23.4,38.9",
+                              fuel_shares_pct={"grassland": 100}, fire_date="2021-08-03")
+        assert estimate["ok"], estimate
+        # Independent dimensional reference: 41 t dry matter, 1613 g CO2/kg -> 66.133 t CO2.
+        assert estimate["emissions_tonnes"]["CO2"]["central"] == 66.1
+        assert estimate["co2_equivalent_tonnes"]["central"] == 71.0
+        assert estimate["range_type"] == "fuel-consumption sensitivity, not confidence intervals"
+        fuels = await call(client, "get_burn_fuel_types", bbox="23.2,38.7,23.4,38.9", fire_date="2021-08-03")
+        assert fuels["ok"] and fuels["fuel_shares_pct"] == {"grassland": 50, "cropland": 50}, fuels
+        assert fuels["worldcover_year"] == 2020 and fuels["pre_fire_map"] is True
+        old = await call(client, "get_burn_fuel_types", bbox="23.2,38.7,23.4,38.9", fire_date="2019-08-03")
+        assert old["ok"] and old["pre_fire_map"] is False and "not pre-fire" in old["map_choice"]
+        mixed = await call(client, "estimate_fire_emissions", burned_area_ha=10, bbox="23.2,38.7,23.4,38.9",
+                           fuel_shares_pct=fuels["fuel_shares_pct"], fire_date="2021-08-03")
+        # Independently worked 5 ha grass + 5 ha rice-residue proxy: 74.729 / 79.70759 t.
+        assert mixed["emissions_tonnes"]["CO2"]["central"] == 74.7
+        assert mixed["co2_equivalent_tonnes"]["central"] == 79.7
+        monthly = await call(client, "detect_burned_area", bbox="0,0,.01,.01", month="2021-08")
+        assert monthly["ok"] and monthly["scope_kind"] == "monthly_bbox_aggregate", monthly
+        assert monthly["burned_area_ha"] == 24.7 and monthly["first_burn_date"] == "2021-08-03"
+        assert "perimeter" not in monthly and "feature_index" not in monthly
+        automatic = await call(client, "estimate_fire_emissions", burned_area_ha=monthly["burned_area_ha"],
+                               bbox=monthly["bbox"], fire_date=monthly["first_burn_date"])
+        assert automatic["ok"] and "WorldCover 2020" in automatic["fuel_source"], automatic
+        invalid = await call(client, "get_fire_exposure", perimeter=monthly)
+        assert invalid.get("error_type") == "invalid_perimeter"
+        normalized = await call(client, "estimate_fire_emissions", burned_area_ha=10, bbox="23.2,38.7,23.4,38.9",
+                                fuel_shares_pct={"grassland": 5, "cropland": 5})
+        assert normalized["emissions_tonnes"] == mixed["emissions_tonnes"]
+        doubled = await call(client, "estimate_fire_emissions", burned_area_ha=20, bbox="23.2,38.7,23.4,38.9",
+                             fuel_shares_pct={"grassland": 100})
+        assert doubled["emissions_tonnes"]["CO2"]["central"] == 132
+        forest = await call(client, "estimate_fire_emissions", burned_area_ha=1, bbox="23.2,38.7,23.4,38.9",
+                            fuel_shares_pct={"tree_cover": 100})
+        assert forest["emissions_tonnes"]["CO2"]["central"] == 31.1  # 19.8 * 1569 / 1000 = 31.0662.
+        assert forest["by_fuel_type"]["tree_cover"]["fuel_burned_t_per_ha"] == 19.8
+        for gas in estimate["emissions_tonnes"].values():
+            assert gas["low"] <= gas["central"] <= gas["high"]
+        for overrides in [{"burned_area_ha": 0}, {"burned_area_ha": -1}, {"burned_area_ha": "nan"},
+                          {"burned_area_ha": "inf"}, {"burned_area_ha": 1e30}, {"bbox": "nan,0,1,1"},
+                          {"fuel_shares_pct": {}}, {"fuel_shares_pct": {"grassland": -1}},
+                          {"fuel_shares_pct": {"grassland": "inf"}}, {"fuel_shares_pct": {"unknown": 100}},
+                          {"fuel_shares_pct": {"water": 100}}, {"fuel_shares_pct": {"grassland": 0}},
+                          {"fuel_shares_pct": {"grassland": 1e308, "cropland": 1e308}},
+                          {"fire_date": "2021-02-30"}]:
+            invalid = await call(client, "estimate_fire_emissions", **({"burned_area_ha": 10,
+                                 "bbox": "23.2,38.7,23.4,38.9", "fuel_shares_pct": {"grassland": 100}} | overrides))
+            assert invalid.get("ok") is False, invalid
+        unknown_date = await call(client, "get_burn_fuel_types", bbox="23.2,38.7,23.4,38.9")
+        assert unknown_date["worldcover_year"] == 2021 and unknown_date["pre_fire_map"] is None
+        tiny = await call(client, "get_burn_fuel_types", bbox="0,0,1e-300,1e-300")
+        assert tiny.get("ok") is False
+        for month in ["2021-13", "2021-08-99", "2999-01"]:
+            invalid = await call(client, "detect_burned_area", bbox="0,0,.01,.01", month=month)
+            assert invalid.get("ok") is False
     async with session(transport, "partial") as (client, _):
         partial = await call(client, "get_fire_exposure", perimeter=FEATURE)
         assert partial.get("error_type") == "overpass_unavailable" and "building_way_count" not in partial
@@ -294,7 +374,20 @@ async def checks(transport):
                 assert community["ok"] and community["wind_context"]["aligned_fraction"] is None
                 assert community["wind_context"]["available"] is False and community["warnings"]
                 assert community["pollutants"]["pm2_5"]["mean_change"] == 10
-    print(f"PASS {transport}: exposure/security, weather, shared AQ/defaults/missingness, false-green guards")
+    for case in ["stac-empty", "stac-next", "stac-partial", "stac-overlap", "stats-missing", "stats-empty", "stats-negative", "stats-rejected", "modis-zero"]:
+        async with session(transport, case) as (client, _):
+            fuel = await call(client, "get_burn_fuel_types", bbox="0,0,.01,.01", fire_date="2021-08-03")
+            monthly = await call(client, "detect_burned_area", bbox="0,0,.01,.01", month="2021-08")
+            if case == "modis-zero":
+                assert fuel["ok"] and monthly["ok"] and monthly["burned_area_ha"] == 0
+                assert "first_burn_date" not in monthly and "perimeter" not in monthly
+            else:
+                assert fuel.get("error_type") == "fuel_unavailable", (case, fuel)
+                assert monthly.get("error_type") == "burned_area_unavailable", (case, monthly)
+                assert "burned_area_ha" not in monthly
+                if case == "stats-rejected":
+                    assert monthly["provider_http_status"] == 400 and fuel["provider_http_status"] == 400
+    print(f"PASS {transport}: all context/screening tools, arithmetic, provenance, data failures, security and false-green guards")
 
 
 async def main():

@@ -48,6 +48,7 @@ import tifffile
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from PIL import Image as PILImage
+from screening import detect_burned_area, estimate_fire_emissions, get_burn_fuel_types
 
 # Headless server: select Agg before any pyplot import (matplotlib.use docs).
 matplotlib.use("Agg")
@@ -110,6 +111,9 @@ logger = logging.getLogger("fire-mcp")
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP("Fire Detection Server", host="0.0.0.0", port=8000, stateless_http=True)
+mcp.tool()(estimate_fire_emissions)
+mcp.tool()(get_burn_fuel_types)
+mcp.tool()(detect_burned_area)
 
 
 # ---------------------------------------------------------------------------

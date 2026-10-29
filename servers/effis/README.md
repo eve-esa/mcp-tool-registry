@@ -51,6 +51,64 @@ Open-Meteo's [free API terms](https://open-meteo.com/en/terms) restrict service
 use; open data licensing does not establish free hosted/commercial eligibility.
 Deployment maintainers must resolve the appropriate service plan/access.
 
+## Fuel, monthly fallback and emissions screening
+
+`get_burn_fuel_types` uses WorldCover 2020 v100 for events through 2021 and 2021
+v200 thereafter (2021 when the date is unknown). A 2020 map is **not** pre-fire
+for a 2020-or-earlier event. Its proportions describe the whole bbox, not burnt
+pixels; use an EFFIS bbox with zero buffer and keep this proxy limitation visible.
+WorldCover attribution and dataset citation are returned with the year/tile IDs.
+
+`detect_burned_area` is an optional MCD64A1 v061 monthly **bbox aggregate** of
+recorded pixels, possibly multiple fires. Its earliest/latest/peak days are not
+individual event dates; it returns no polygon and cannot feed polygon exposure.
+No detected pixels differs from unavailable data and is not proof no fire occurred.
+Both raster tools reject paginated/truncated searches, missing/overlapping tile
+envelopes, more than eight selected tiles and less than 99.99% valid statistics.
+Narrow the bbox when coverage is unsupported. Categorical downsampling and
+spherical clipped-bbox area weighting are approximate, not validated accuracy.
+No worldwide availability or complete small-fire/QA guarantee is established.
+
+**Observed live-provider limitation:** WorldCover succeeded in local historical
+Evia checks, but PC's statistics endpoint rejected the published MODIS Burn_Date
+asset with HTTP 400 (ingestion source not registered). No live MODIS success was
+verified. The tool returns `burned_area_unavailable` and safe HTTP status metadata,
+not a fabricated zero; a supported provider path/configuration or an explicitly
+approved alternative is needed. No bypass or direct-raster stack is introduced.
+
+`estimate_fire_emissions` accepts caller area/bbox/date and explicit fuel shares,
+or the WorldCover proxy. Area is not authenticated as an EFFIS event. All numeric
+inputs must be finite/nonnegative (area positive); area may not exceed spherical
+bbox area by more than the documented 5% envelope tolerance. Unsupported/empty
+burnable shares are unavailable, not zero emissions. The retained gas, CO2e,
+car-year and by-fuel outputs carry units and explicit assumptions.
+
+**screening-v1 factor basis:**
+
+- [IPCC 2006 Volume 4, Eq. 2.27 and Tables 2.4/2.5](https://www.ipcc-nggip.iges.or.jp/public/2006gl/pdf/4_Volume4/V4_02_Ch2_Generic.pdf):
+  consumed dry matter t/ha already includes biomass times combustion completeness.
+  Central forest scenarios use primary tropical 83.9 (slash/burn transferred to
+  wildfire), other-temperate wildfire 19.8 and boreal-general wildfire 52.8.
+  Other representative centres are all-shrubland 14.3, grassland 4.1 and rice
+  residue 5.5. Low/high use alternative named table rows, not table SE/SD or a
+  statistical interval. Every used row/transfer and coefficient is returned.
+- Wetland/moss-lichen use an explicit grassland proxy; mangroves use tropical
+  forest. These are not measured class-specific fuel loads; peat/soil combustion
+  is excluded. Absolute latitude selects forest class heuristically, not a mapped
+  ecozone. These choices replace several unsourced prototype numeric defaults.
+- Gas means: IPCC Table 2.5, g/kg dry matter. PM2.5 means:
+  [Andreae & Merlet (2001), Table 1](https://doi.org/10.1029/2000GB001382).
+- GWP100 is explicitly versioned to [AR6 WGI 2021 Table 7.15](https://www.ipcc.ch/report/ar6/wg1/downloads/report/IPCC_AR6_WGI_Chapter07.pdf):
+  non-fossil CH4 27 and N2O 273. The vehicle comparison uses
+  [EPA's typical 4.6 t tailpipe CO2/year](https://www.epa.gov/greenvehicles/greenhouse-gas-emissions-typical-passenger-vehicle).
+
+Low/central/high vary fuel-consumption assumptions only: **sensitivity, not
+confidence intervals, measured emissions or a claimed accuracy percentage**.
+They do not propagate all land-cover, area, emission-factor or model uncertainty.
+Gross CO2/CO2e release is not net climate impact, an inventory total, a carbon
+offset or guaranteed regrowth. Car-years are illustrative tailpipe-CO2 comparisons,
+not life-cycle equivalence. No causal smoke, damage or population inference follows.
+
 <!-- BEGIN GENERATED CITATION: edit CITATION.cff, then run `python scripts/citation.py servers/<name>` -->
 
 ## Authors
