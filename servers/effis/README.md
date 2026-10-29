@@ -28,6 +28,29 @@ Run `python test_contract.py` for deterministic real stdio/HTTP client checks
 with provider fixtures; `python test.py --unit-tests` retains inherited checks.
 Live checks are separate and must not report unavailable/gated cases as passed.
 
+## Weather and concentration context
+
+`get_fire_weather` returns UTC ERA5 event-hour weather (1–31 past event days)
+and antecedent rain (1–90 days), with units, counts and unavailable values.
+This is regional reanalysis, not local fuel moisture or a spread forecast.
+
+`get_community_air_quality` retains the seven-day concentration baseline and
+optional fire-to-community wind context. `get_smoke_signal` is a compatible
+bbox-centre adapter over the same CAMS Europe calculation: CO, PM2.5 and PM10,
+a fourteen-day default baseline, configurable 3–60 baseline days and 1–30 days
+after the event (inclusive endpoints). It retains peak ratios; the community
+interface retains mean ratios. Missing optional wind does not erase valid AQ.
+Requested concentrations require complete expected hours/units; missing is not
+zero, and a zero baseline yields an undefined (null) ratio.
+
+CAMS Europe historical data begins in 2013 and availability is provider-dependent;
+no worldwide support is promised. These are modeled concentrations, not sensors,
+estimated emissions, health thresholds or proof that a particular fire caused
+smoke. Recent periods can be unavailable. Responses preserve model attribution.
+Open-Meteo's [free API terms](https://open-meteo.com/en/terms) restrict service
+use; open data licensing does not establish free hosted/commercial eligibility.
+Deployment maintainers must resolve the appropriate service plan/access.
+
 <!-- BEGIN GENERATED CITATION: edit CITATION.cff, then run `python scripts/citation.py servers/<name>` -->
 
 ## Authors

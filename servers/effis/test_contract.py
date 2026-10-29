@@ -13,6 +13,7 @@ import sys
 import tempfile
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -56,6 +57,52 @@ def provider(request):
                  "tags": {"place": "village", "name": "Fixture"}},
             ],
         })
+    if request.url.host == "archive-api.open-meteo.com":
+        start = datetime.fromisoformat(request.url.params["start_date"])
+        end = datetime.fromisoformat(request.url.params["end_date"])
+        days = (end - start).days + 1
+        hours = [(start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(days * 24)]
+        units = {"temperature_2m": "°C", "relative_humidity_2m": "%", "wind_speed_10m": "m/s",
+                 "wind_direction_10m": "°", "wind_gusts_10m": "m/s", "precipitation": "mm"}
+        values = {"temperature_2m": 25, "relative_humidity_2m": 40, "wind_speed_10m": 2,
+                  "wind_direction_10m": 270, "wind_gusts_10m": 4, "precipitation": 0.2}
+        if case == "weather-missing":
+            values = dict.fromkeys(values)
+        if case == "weather-units":
+            units["wind_speed_10m"] = "km/h"
+        return httpx.Response(200, json={
+            "utc_offset_seconds": 0, "latitude": 0, "longitude": 0,
+            "hourly_units": units, "daily_units": {"precipitation_sum": "mm"},
+            "hourly": {"time": hours, **{k: [v] * len(hours) for k, v in values.items()}},
+            "daily": {"time": [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)],
+                      "precipitation_sum": [1] * days},
+        })
+    if request.url.host == "air-quality-api.open-meteo.com":
+        start = datetime.fromisoformat(request.url.params["start_date"])
+        end = datetime.fromisoformat(request.url.params["end_date"])
+        hours = [(start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M")
+                 for i in range(((end - start).days + 1) * 24)]
+        pollutants = request.url.params["hourly"].split(",")
+        baseline = {"carbon_monoxide": 100, "pm2_5": 10, "pm10": 20}
+        payload = {
+            "utc_offset_seconds": 0, "latitude": 38.8, "longitude": 23.3,
+            "hourly_units": {k: "μg/m³" for k in pollutants},
+            "hourly": {"time": hours, **{k: [baseline[k] * (2 if h >= "2021-08-03" else 1) for h in hours]
+                                        for k in pollutants}},
+        }
+        if case == "aq-missing":
+            payload["hourly"]["pm2_5"][-1] = None
+        if case == "aq-negative":
+            payload["hourly"]["pm2_5"][-1] = -1
+        if case == "aq-units":
+            payload["hourly_units"]["pm2_5"] = "ppm"
+        if case == "aq-shifted":
+            payload["hourly"]["time"][0] = "1900-01-01T00:00"
+        if case == "aq-zero":
+            for key in pollutants:
+                payload["hourly"][key] = [v if h >= "2021-08-03" else 0
+                                           for v, h in zip(payload["hourly"][key], hours, strict=True)]
+        return httpx.Response(200, json=payload)
     raise AssertionError(f"Unconfigured provider: {request.url.host}")
 
 
@@ -197,6 +244,30 @@ async def checks(transport):
             assert invalid.get("error_type") == "invalid_perimeter", invalid
         denied = await call(client, "compute_metrics", bbox="0,0,.01,.01", fire_date="2021-08-03")
         assert denied.get("error_type") == "cdse_auth", denied
+        weather = await call(client, "get_fire_weather", latitude=0, longitude=0, start_date="2021-08-05")
+        assert weather["ok"] and weather["antecedent_rain_mm"] == 30, weather
+        assert len(weather["hourly"]["time"]) == 24 and abs(weather["event_rain_mm"] - 4.8) < 1e-8
+        assert weather["event_ranges"]["temperature_2m"] == {"min": 25, "max": 25}
+        community = await call(client, "get_community_air_quality", place_name="Fixture", latitude=38.8,
+                               longitude=23.3, fire_latitude=38.8, fire_longitude=23.0, start_date="2021-08-03")
+        assert community["ok"] and community["baseline_hours"] == 168 and community["event_hours"] == 24
+        assert community["pollutants"]["pm2_5"]["mean_change"] == 10
+        assert community["pollutants"]["carbon_monoxide"]["event_to_baseline_ratio"] == 2
+        assert community["wind_context"]["aligned_fraction"] == 1
+        smoke = await call(client, "get_smoke_signal", bbox="23.2,38.7,23.4,38.9", fire_date="2021-08-03",
+                           days_after=1)
+        assert smoke["ok"] and smoke["baseline_hours"] == 336 and smoke["event_hours"] == 48
+        assert smoke["pollutants"]["pm10"]["peak_vs_baseline"] == 2
+        assert smoke["pollutants"]["pm2_5"]["baseline_mean"] == 10
+        default_smoke = await call(client, "get_smoke_signal", bbox="23.2,38.7,23.4,38.9", fire_date="2021-08-03")
+        assert default_smoke["event_hours"] == 264 and default_smoke["baseline_hours"] == 336
+        for overrides in [{"latitude": "nan"}, {"longitude": 181}, {"start_date": "2021-02-30"},
+                          {"end_date": "2021-08-01"}, {"lookback_days": 0}, {"lookback_days": 91}]:
+            invalid = await call(client, "get_fire_weather", **({"latitude": 38.8, "longitude": 23.3,
+                                 "start_date": "2021-08-03"} | overrides))
+            assert invalid.get("ok") is False and invalid["error_type"].startswith("invalid_"), invalid
+        invalid = await call(client, "get_smoke_signal", bbox="nan,0,1,1", fire_date="2021-08-03")
+        assert invalid.get("ok") is False
     async with session(transport, "partial") as (client, _):
         partial = await call(client, "get_fire_exposure", perimeter=FEATURE)
         assert partial.get("error_type") == "overpass_unavailable" and "building_way_count" not in partial
@@ -210,7 +281,20 @@ async def checks(transport):
                 pass
             else:
                 raise AssertionError(f"{check.__name__} reported success for a failed tool")
-    print(f"PASS {transport}: lookup/exposure, confinement, malformed inputs, optional exports, false-green guards")
+    for case in ["aq-missing", "aq-units", "aq-shifted", "aq-negative", "aq-zero", "weather-missing", "weather-units"]:
+        async with session(transport, case) as (client, _):
+            community = await call(client, "get_community_air_quality", place_name="Fixture", latitude=38.8,
+                                   longitude=23.3, fire_latitude=38.8, fire_longitude=23.0, start_date="2021-08-03")
+            if case in {"aq-missing", "aq-units", "aq-shifted", "aq-negative"}:
+                assert community.get("error_type") == "air_quality_unavailable", (case, community)
+            elif case == "aq-zero":
+                assert community["ok"] and community["pollutants"]["pm2_5"]["event_to_baseline_ratio"] is None
+                assert community["pollutants"]["pm2_5"]["mean_change"] == 20
+            else:
+                assert community["ok"] and community["wind_context"]["aligned_fraction"] is None
+                assert community["wind_context"]["available"] is False and community["warnings"]
+                assert community["pollutants"]["pm2_5"]["mean_change"] == 10
+    print(f"PASS {transport}: exposure/security, weather, shared AQ/defaults/missingness, false-green guards")
 
 
 async def main():

@@ -2644,6 +2644,236 @@ async def compute_metrics(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+async def get_fire_weather(
+    latitude: float, longitude: float, start_date: str,
+    end_date: str | None = None, lookback_days: int = 30,
+) -> str:
+    """ERA5 regional context, not local fuel moisture or a spread forecast.
+
+    Inclusive UTC past event dates (1–31 days), antecedent rain 1–90 days.
+    Null is unknown, not zero. Recent reanalysis can be unavailable.
+    """
+    from datetime import UTC
+
+    if not (math.isfinite(latitude) and math.isfinite(longitude)
+            and -90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return _tool_error("invalid_location", "Supply finite coordinates in range")
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date or start_date, "%Y-%m-%d").date()
+        if start.isoformat() != start_date or end.isoformat() != (end_date or start_date):
+            raise ValueError("Use ISO dates")
+        if not 0 <= (end - start).days < 31 or end >= datetime.now(UTC).date() or not 1 <= lookback_days <= 90:
+            raise ValueError("Request window outside bounds")
+        before = start - timedelta(days=lookback_days)
+        if before.year < 1940:
+            raise ValueError("Outside ERA5 coverage")
+    except (ValueError, OverflowError):
+        return _tool_error("invalid_dates", "Use 1–31 past ISO event days and 1–90 lookback days within ERA5 coverage")
+    units = {"temperature_2m": "°C", "relative_humidity_2m": "%", "wind_speed_10m": "m/s",
+             "wind_direction_10m": "°", "wind_gusts_10m": "m/s", "precipitation": "mm"}
+    try:
+        response = await _http_get("https://archive-api.open-meteo.com/v1/archive", params={
+            "latitude": latitude, "longitude": longitude, "start_date": before.isoformat(), "end_date": end.isoformat(),
+            "hourly": ",".join(units), "daily": "precipitation_sum", "models": "era5", "timezone": "UTC",
+            "wind_speed_unit": "ms",
+        })
+        data = response.json()
+        hourly, daily = data["hourly"], data["daily"]
+        hours = pd.date_range(before, end + timedelta(days=1), freq="h", inclusive="left")
+        days = pd.date_range(before, end, freq="D")
+        if (data["utc_offset_seconds"] != 0 or hourly["time"] != hours.strftime("%Y-%m-%dT%H:%M").tolist()
+                or daily["time"] != days.strftime("%Y-%m-%d").tolist()
+                or any(data["hourly_units"].get(k) != v for k, v in units.items())
+                or data["daily_units"].get("precipitation_sum") != "mm"):
+            raise ValueError("Unexpected dates or units")
+        for table, columns in [(hourly, units), (daily, ["precipitation_sum"])]:
+            for key in columns:
+                values = table[key]
+                if len(values) != len(table["time"]) or any(
+                    v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v))
+                    for v in values
+                ):
+                    raise ValueError("Unexpected numeric values")
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+        return _tool_error("weather_unavailable", "ERA5 data unavailable or dates/units/values unexpected")
+    event = {k: hourly[k][lookback_days * 24:] for k in ["time", *units]}
+    antecedent = {k: daily[k][:lookback_days] for k in ["time", "precipitation_sum"]}
+    missing = {k: sum(v is None for v in event[k]) for k in units}
+    rain = antecedent["precipitation_sum"]
+    missing["antecedent_rain_days"] = sum(v is None for v in rain)
+    warnings = ["ERA5 is regional reanalysis (~25 km), not local fire behaviour or fuel moisture. "
+                "Wind direction is where wind comes FROM."]
+    if any(missing.values()):
+        warnings.append("Missing values are unknown, not zero; recent ERA5 can be delayed")
+    if all(v is None for k in units for v in event[k]):
+        return _tool_error("weather_unavailable", "No event-hour ERA5 values", missing=missing, warnings=warnings)
+    ranges = {}
+    for key in units:
+        values = [v for v in event[key] if v is not None]
+        ranges[key] = {"min": min(values, default=None), "max": max(values, default=None)}
+    return json.dumps({
+        "ok": True, "source": "Open-Meteo / ECMWF ERA5", "timezone": "UTC", "event_ranges": ranges,
+        "event_rain_mm": sum(event["precipitation"]) if not missing["precipitation"] else None,
+        "latitude": latitude, "longitude": longitude, "grid_latitude": data.get("latitude"),
+        "grid_longitude": data.get("longitude"), "start_date": start_date, "end_date": end.isoformat(),
+        "hourly": event, "hourly_units": units, "antecedent_daily": antecedent,
+        "antecedent_rain_mm": sum(rain) if not missing["antecedent_rain_days"] else None,
+        "missing": missing, "warnings": warnings,
+        "attribution": "Weather data by Open-Meteo.com and ECMWF ERA5 (CC BY 4.0)",
+        "source_url": "https://open-meteo.com/", "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+    }, allow_nan=False)
+
+
+async def _air_quality_data(latitude, longitude, start_date, end_date, baseline_days, pollutants):
+    """One provider/validation/statistics path for both public AQ interfaces."""
+    from datetime import UTC
+
+    try:
+        if not (math.isfinite(latitude) and math.isfinite(longitude)
+                and -90 <= latitude <= 90 and -180 <= longitude <= 180):
+            raise ValueError("Invalid coordinates")
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        before = start - timedelta(days=baseline_days)
+        if (start.isoformat() != start_date or end.isoformat() != end_date
+                or not 0 <= (end - start).days < 31 or end >= datetime.now(UTC).date()
+                or not 1 <= baseline_days <= 60 or before.year < 2013):
+            raise ValueError("Unsupported dates/window")
+    except (ValueError, TypeError, OverflowError):
+        return {"ok": False, "error_type": "invalid_input", "error": "Use valid coordinates, past ISO dates and bounded windows"}
+    try:
+        response = await _http_get("https://air-quality-api.open-meteo.com/v1/air-quality", params={
+            "latitude": latitude, "longitude": longitude, "start_date": before.isoformat(), "end_date": end_date,
+            "hourly": ",".join(pollutants), "domains": "cams_europe", "timezone": "GMT",
+        })
+        data = response.json()
+        hours = pd.date_range(before, end + timedelta(days=1), freq="h", inclusive="left").strftime("%Y-%m-%dT%H:%M").tolist()
+        hourly = data["hourly"]
+        if data["utc_offset_seconds"] != 0 or hourly["time"] != hours:
+            raise ValueError("Incomplete/shifted times")
+        for key in pollutants:
+            values = hourly[key]
+            if (data["hourly_units"][key] not in {"μg/m³", "µg/m³"} or len(values) != len(hours)
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or not math.isfinite(v) or v < 0 for v in values)):
+                raise ValueError("Missing/invalid concentrations or units")
+        frame = pd.DataFrame({k: hourly[k] for k in pollutants}, index=hours, dtype=float)
+    except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError):
+        return {"ok": False, "error_type": "air_quality_unavailable",
+                "error": "CAMS Europe data unavailable/incomplete or units/times/values unexpected; no comparison computed"}
+    baseline, event = frame.iloc[:baseline_days * 24], frame.iloc[baseline_days * 24:]
+    summaries = {}
+    for key in pollutants:
+        background, during = float(baseline[key].mean()), float(event[key].mean())
+        peak, peak_time = max(zip(event[key], event.index, strict=True))
+        summaries[key] = {"unit": "μg/m³", "baseline_mean": background, "event_mean": during,
+                          "event_max": float(peak), "peak_time_utc": peak_time, "mean_change": during - background,
+                          "event_to_baseline_ratio": during / background if background > 0 else None,
+                          "peak_vs_baseline": float(peak) / background if background > 0 else None}
+    return {
+        "ok": True, "source": "CAMS Europe modeled concentrations via Open-Meteo", "timezone": "UTC",
+        "latitude": latitude, "longitude": longitude, "grid_latitude": data.get("latitude"),
+        "grid_longitude": data.get("longitude"), "start_date": start_date, "end_date": end_date,
+        "baseline_start": before.isoformat(), "baseline_end": (start - timedelta(days=1)).isoformat(),
+        "baseline_hours": len(baseline), "event_hours": len(event), "pollutants": summaries,
+        "hourly": {"time": event.index.tolist(), **{k: event[k].tolist() for k in pollutants}},
+        "warnings": ["Modeled regional concentrations, not local measurements or estimated emissions.",
+                     "Differences from the preceding baseline do not establish fire-specific causation or health thresholds.",
+                     "CAMS Europe coverage and available historical periods are limited; no worldwide guarantee."],
+        "attribution": "CAMS / Open-Meteo (CC BY 4.0)",
+        "source_url": "https://open-meteo.com/en/docs/air-quality-api",
+    }
+
+
+@mcp.tool()
+async def get_community_air_quality(
+    place_name: str, latitude: float, longitude: float,
+    fire_latitude: float, fire_longitude: float, start_date: str, end_date: str | None = None,
+) -> str:
+    """CAMS Europe CO/PM2.5 mean comparison against seven preceding days.
+
+    Optional ERA5 wind alignment is coarse context, not plume transport or
+    evidence the fire caused pollution. Event dates are 1–31 past UTC days.
+    Incomplete concentrations are unavailable; unavailable wind does not erase AQ.
+    """
+    from pyproj import Geod
+
+    if not place_name.strip() or not (math.isfinite(fire_latitude) and math.isfinite(fire_longitude)
+                                     and -90 <= fire_latitude <= 90 and -180 <= fire_longitude <= 180):
+        return _tool_error("invalid_location", "Supply a community name and finite fire-centroid coordinates")
+    result = await _air_quality_data(latitude, longitude, start_date, end_date or start_date, 7,
+                                     ["pm2_5", "carbon_monoxide"])
+    if not result["ok"]:
+        return json.dumps(result)
+    result["place_name"] = place_name
+    weather = json.loads(await get_fire_weather(latitude, longitude, start_date, end_date, lookback_days=7))
+    bearing, _, distance = Geod(ellps="WGS84").inv(fire_longitude, fire_latitude, longitude, latitude)
+    wind = {"fire_centroid_distance_km": distance / 1000, "fire_to_community_bearing_deg": bearing % 360,
+            "aligned_fraction": None, "noncalm_valid_hours": 0, "event_hours": result["event_hours"],
+            "definition": "Wind TO within 45° of fire-to-community bearing, speed >=1 m/s; not evaluated within 1 km"}
+    if weather.get("ok"):
+        direction = np.asarray(weather["hourly"]["wind_direction_10m"], dtype=float)
+        speed = np.asarray(weather["hourly"]["wind_speed_10m"], dtype=float)
+        valid = np.isfinite(direction) & np.isfinite(speed) & (speed >= 1)
+        aligned = valid & (np.abs((direction + 180 - bearing + 180) % 360 - 180) <= 45)
+        usable = int(valid.sum())
+        wind.update(available=True, noncalm_valid_hours=usable,
+                    aligned_fraction=int(aligned.sum()) / usable if usable and distance >= 1000 else None)
+        result["warnings"].extend(weather["warnings"])
+    else:
+        wind["available"] = False
+        result["warnings"].append("ERA5 wind context unavailable; concentration comparison remains valid")
+    result["wind_context"] = wind
+    result["warnings"].append("Wind alignment is not transport simulation; place points do not represent every resident")
+    return json.dumps(result, allow_nan=False)
+
+
+@mcp.tool()
+async def get_smoke_signal(bbox: str, fire_date: str, days_after: int = 10, baseline_days: int = 14) -> str:
+    """Compatible bbox-centre CO/PM2.5/PM10 comparison, not fire-specific smoke proof.
+
+    Keeps the fourteen-day baseline and configurable 1–30 days after the event.
+    Both endpoints are inclusive. Baseline: 3–60 days. Historical CAMS Europe only;
+    actual returned event dates are clipped to past UTC days, never forecasts.
+    """
+    from datetime import UTC
+
+    try:
+        west, south, east, north = [float(v) for v in bbox.split(",")]
+        if not all(math.isfinite(v) for v in (west, south, east, north)) or not (
+            -180 <= west < east <= 180 and -90 <= south < north <= 90
+        ) or not 1 <= days_after <= 30 or not 3 <= baseline_days <= 60:
+            raise ValueError("Invalid bbox/window")
+        start = datetime.strptime(fire_date, "%Y-%m-%d").date()
+        if start.isoformat() != fire_date:
+            raise ValueError("Use ISO date")
+        requested_end = start + timedelta(days=days_after)
+        end = min(requested_end, datetime.now(UTC).date() - timedelta(days=1))
+    except (ValueError, TypeError, OverflowError):
+        return _tool_error("invalid_input", "Use finite bbox, ISO date and bounded event/baseline windows")
+    lat, lon = (south + north) / 2, (west + east) / 2
+    result = await _air_quality_data(lat, lon, fire_date, end.isoformat(), baseline_days,
+                                     ["carbon_monoxide", "pm2_5", "pm10"])
+    if not result["ok"]:
+        return json.dumps(result)
+    pollutants = {}
+    for key, value in result["pollutants"].items():
+        pollutants[key] = {"unit": "ug/m3", "baseline_mean": round(value["baseline_mean"], 1),
+                           "fire_period_mean": round(value["event_mean"], 1),
+                           "fire_period_peak": round(value["event_max"], 1), "peak_time_utc": value["peak_time_utc"],
+                           "peak_vs_baseline": round(value["peak_vs_baseline"], 1)
+                           if value["peak_vs_baseline"] is not None else None}
+    if requested_end != end:
+        result["warnings"].append("Requested event window clipped to past UTC days; not a complete requested-period comparison")
+    return json.dumps({**result, "pollutants": pollutants, "location": {"lat": round(lat, 4), "lon": round(lon, 4)},
+                       "fire_period": f"{fire_date} to {end}",
+                       "baseline_period": f"{result['baseline_start']} to {result['baseline_end']}",
+                       "note": "Model concentrations, not an emission measurement or proof that this fire caused smoke"},
+                      allow_nan=False)
+
+
+@mcp.tool()
 async def get_fire_exposure(
     geojson_path: str | None = None, feature_index: int = 0, refresh: bool = False,
     perimeter: dict | None = None, export: bool | None = None,
