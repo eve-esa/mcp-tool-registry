@@ -69,6 +69,15 @@ OPeNDAP.
 Network-dependent CEDA, Nominatim, and OPeNDAP calls are mocked and are not
 made by the test suite.
 
-## Author
-- Gianluca Squarcia ([@github](https://github.com/gianlucasquarcia))
-- Davide Poveromo
+<!-- BEGIN GENERATED CITATION: edit CITATION.cff, then run `python scripts/citation.py servers/<name>` -->
+
+## Authors
+
+- **Gianluca Squarcia**, [@gianlucasquarcia](https://github.com/gianlucasquarcia)
+- **Davide Poveromo**, [@podak](https://github.com/podak)
+
+## Citation
+
+Citation metadata lives in [`CITATION.cff`](CITATION.cff). Convert it to BibTeX or APA with [cffconvert](https://github.com/citation-file-format/cffconvert): `cffconvert -i CITATION.cff -f bibtex`.
+
+<!-- END GENERATED CITATION -->
