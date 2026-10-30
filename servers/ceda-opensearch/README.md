@@ -12,9 +12,13 @@ OPeNDAP data service:
   such as `project`, `sensor`, or `data_type`; returns a numbered list of
   dataset UUIDs and titles.
 - `ceda_describe` — inspects a dataset through OPeNDAP: dimensions, coordinate
-  ranges, variables with units, and global attributes.
+  ranges, variables with units, and global attributes. It scans the dataset's
+  full file listing for a readable file instead of stopping at unreadable
+  entries that sort first (READMEs, GeoTIFF tiles, ...). Optional
+  `start_date`/`end_date` narrow the scan for tile-dominated listings whose
+  readable files sit too deep for pagination to reach.
 - `ceda_files` — lists a dataset's files with dates, sizes, and OPeNDAP
-  availability.
+  availability; `opendap_only` skips straight to the OPeNDAP-readable files.
 - `ceda_extract` — extracts any dataset and returns per-variable statistics
   (count, mean, standard deviation, percentiles) plus a pipe-delimited sample
   of up to 100 rows.

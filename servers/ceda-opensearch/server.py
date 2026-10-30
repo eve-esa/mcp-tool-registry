@@ -162,7 +162,8 @@ async def ceda_run(
         latitude: Point latitude; provide together with longitude.
         longitude: Point longitude; provide together with latitude.
         dataset_uuid: Optional dataset UUID to skip the dataset search.
-        dataset_index: Optional zero-based index of a matching dataset.
+        dataset_index: Optional zero-based index of a matching dataset;
+            out-of-range values fall back to a sole single match.
         max_files: Maximum OPeNDAP files to read per dataset; omit for the
             CEDA_MAX_FILES limit (5 by default, every file when disabled).
 
@@ -339,15 +340,23 @@ async def ceda_search(
     description=(
         "Inspect the structure of a CEDA dataset through OPeNDAP: dimensions, "
         "coordinate ranges, variables with units, and global attributes. Use it "
-        "before ceda_extract to pick variable names."
+        "before ceda_extract to pick variable names. Optional date windows help "
+        "when the file listing starts with thousands of non-OPeNDAP tiles."
     ),
     annotations=READ_ONLY_ANNOTATIONS,
 )
-async def ceda_describe(dataset_uuid: str) -> str:
+async def ceda_describe(
+    dataset_uuid: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> str:
     """Describe the structure of a CEDA dataset (dimensions, variables, units).
 
     Args:
         dataset_uuid: Dataset UUID from ``ceda_search``.
+        start_date: Optional window start (ISO 8601 or natural language); the
+            readable-file scan only sees files dated within the window.
+        end_date: Optional window end (ISO 8601 or natural language).
 
     Returns:
         Compact text listing dimensions, coordinate ranges, variables with
@@ -356,12 +365,14 @@ async def ceda_describe(dataset_uuid: str) -> str:
     uuid = (dataset_uuid or "").strip()
     if not uuid:
         raise ValueError("dataset_uuid is required.")
+    parsed_start = parse_when(start_date) if start_date else None
+    parsed_end = parse_when(end_date) if end_date else None
 
     def execute() -> tuple[str, Any]:
         with CedaOpenSearchClient() as client:
-            files = [item for item in client.list_files(uuid, limit=1) if item["opendap"]]
+            files = client.list_files(uuid, parsed_start, parsed_end, 1, True)
         if not files:
-            raise CedaOpenSearchError(f"No OPeNDAP files found for dataset {uuid}.")
+            raise CedaOpenSearchError(f"No OPeNDAP files found for dataset {uuid} after scanning its file listing.")
         url = files[0]["opendap"]
         return url, open_subset(url).load()
 
@@ -376,7 +387,8 @@ async def ceda_describe(dataset_uuid: str) -> str:
     title="CEDA dataset files",
     description=(
         "List the files inside a CEDA dataset with dates, sizes, and OPeNDAP "
-        "availability. Dates accept natural language such as 'June 2020'."
+        "availability; opendap_only skips straight to the OPeNDAP-readable "
+        "files. Dates accept natural language such as 'June 2020'."
     ),
     annotations=READ_ONLY_ANNOTATIONS,
 )
@@ -385,6 +397,7 @@ async def ceda_files(
     start_date: str | None = None,
     end_date: str | None = None,
     limit: int | None = None,
+    opendap_only: bool = False,
 ) -> str:
     """List the files of a CEDA dataset with dates, sizes, and OPeNDAP status.
 
@@ -394,6 +407,8 @@ async def ceda_files(
         end_date: Optional window end (ISO 8601 or natural language).
         limit: Maximum number of files to list; omit for the CEDA_MAX_ELEMENTS
             cap (100 by default, every file when disabled).
+        opendap_only: List only OPeNDAP-readable files; the scan continues
+            past earlier non-OPeNDAP entries instead of stopping at them.
 
     Returns:
         Numbered file lines with title, date, human-readable size, and
@@ -410,7 +425,7 @@ async def ceda_files(
 
     def execute() -> list[dict[str, Any]]:
         with CedaOpenSearchClient() as client:
-            return client.list_files(uuid, parsed_start, parsed_end, listed)
+            return client.list_files(uuid, parsed_start, parsed_end, listed, opendap_only)
 
     try:
         files = await asyncio.to_thread(execute)
@@ -494,9 +509,12 @@ async def ceda_extract(
         product_version: Product version filter.
         drs_id: Data Reference Syntax identifier.
         parent_identifier: Collection UUID to search within.
-        dataset_index: Extract the Nth search result instead of all of them.
-        max_files: Maximum files per dataset to read; omit for the
-            CEDA_MAX_FILES limit (5 by default, every file when disabled).
+        dataset_index: Zero-based index of the search result to extract;
+            out-of-range values fall back to a sole single match. Omit to
+            use the first result(s) up to max_datasets.
+        max_files: Maximum OPeNDAP-readable files per dataset to read; omit
+            for the CEDA_MAX_FILES limit (5 by default, every file when
+            disabled).
         max_datasets: Maximum datasets to extract; capped at the
             CEDA_MAX_ELEMENTS limit (100) unless it is disabled.
 

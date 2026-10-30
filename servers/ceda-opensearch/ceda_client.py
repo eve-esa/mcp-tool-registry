@@ -48,6 +48,9 @@ _FORMATS = {
 _LATITUDE_NAMES = ("lat", "latitude", "y")
 _LONGITUDE_NAMES = ("lon", "longitude", "x")
 _TIME_NAMES = ("time", "time0", "valid_time", "t")
+# Upper bound on listing records examined while hunting for OPeNDAP-readable
+# files, so alphabetical fronts of unreadable files cannot stall the pager.
+FILE_SCAN_LIMIT = 2000
 
 
 def _http_timeout() -> int:
@@ -244,26 +247,40 @@ class CedaOpenSearchClient:
         start_date: str | None = None,
         end_date: str | None = None,
         limit: int | None = None,
+        opendap_only: bool = False,
     ) -> list[dict[str, Any]]:
         """List a dataset's files, including their OPeNDAP URLs.
 
         ``limit`` bounds the number of files returned; ``None`` (the default)
-        pages through the whole result set and returns every file.
+        pages through the whole result set and returns every file. With
+        ``opendap_only`` the OPeNDAP filter is applied inside the pager, which
+        keeps scanning past alphabetically-earlier unreadable entries
+        (READMEs, scripts, GeoTIFF tiles, ...) until ``limit`` readable files
+        are collected, the listing is exhausted, or ``FILE_SCAN_LIMIT``
+        records have been examined.
         """
         files: list[dict[str, Any]] = []
+        scanned = 0
         start_record = 1
         while limit is None or len(files) < limit:
+            if opendap_only and scanned >= FILE_SCAN_LIMIT:
+                break
+            page_size = 100 if limit is None or opendap_only else min(100, limit - len(files))
             result = self.search(
                 parent_identifier=dataset_uuid,
                 start_date=start_date,
                 end_date=end_date,
-                max_records=100 if limit is None else min(100, limit - len(files)),
+                max_records=page_size,
                 start_record=start_record,
             )
             if isinstance(result, str):
                 raise CedaOpenSearchError("Expected GeoJSON from the CEDA service")
             features = result.get("features", [])
-            files.extend(_file_entry(feature) for feature in features)
+            entries = [_file_entry(feature) for feature in features]
+            scanned += len(entries)
+            if opendap_only:
+                entries = [entry for entry in entries if entry["opendap"]]
+            files.extend(entries)
             start_record += len(features)
             if not features or start_record > result.get("totalResults", 0):
                 break
@@ -334,6 +351,27 @@ def _concat_dim(parts: list[xr.Dataset]) -> str:
     return str(parts[0].dims[0])
 
 
+def _select_dataset(datasets: list[dict[str, Any]], dataset_index: int | None) -> list[dict[str, Any]]:
+    """Apply a zero-based ``dataset_index`` selection to search results.
+
+    Out-of-range indices fall back to the sole result when the search
+    matched exactly one dataset, because callers often pass 1-based
+    indices; with several matches an out-of-range index raises an error
+    that lists the available results.
+    """
+    if dataset_index is None or len(datasets) <= 1:
+        return datasets
+    if 0 <= dataset_index < len(datasets):
+        return [datasets[dataset_index]]
+    matches = "; ".join(f"[{position}] {item['uuid']} | {item['title']}" for position, item in enumerate(datasets[:5]))
+    suffix = "; ..." if len(datasets) > 5 else ""
+    raise CedaOpenSearchError(
+        f"dataset_index {dataset_index} is out of range: the search matched "
+        f"{len(datasets)} datasets with zero-based indices 0-{len(datasets) - 1}. "
+        f"Matches: {matches}{suffix}. Omit dataset_index to use the first match."
+    )
+
+
 def run_extraction(
     client: CedaOpenSearchClient,
     *,
@@ -350,8 +388,9 @@ def run_extraction(
     """Search the archive with arbitrary filters and load OPeNDAP subsets.
 
     ``search_filters`` accepts any snake_case OpenSearch parameter. When
-    ``dataset_uuid`` is given the search is skipped entirely. ``variables``
-    filters data variables by case-insensitive substring match.
+    ``dataset_uuid`` is given the search is skipped entirely.
+    ``dataset_index`` is zero-based. ``variables`` filters data variables
+    by case-insensitive substring match.
     """
     if dataset_uuid is not None:
         datasets: list[dict[str, Any]] = [{"uuid": dataset_uuid, "title": dataset_uuid}]
@@ -367,10 +406,7 @@ def run_extraction(
             start_record += len(page)
         if not datasets:
             raise CedaOpenSearchError("No datasets matched the search filters")
-        if dataset_index is not None:
-            if not 0 <= dataset_index < len(datasets):
-                raise CedaOpenSearchError(f"dataset_index must be between 0 and {len(datasets) - 1}")
-            datasets = [datasets[dataset_index]]
+        datasets = _select_dataset(datasets, dataset_index)
     datasets = datasets[:max_datasets]
 
     start_date = search_filters.get("start_date")
@@ -378,7 +414,9 @@ def run_extraction(
     results: list[dict[str, Any]] = []
     for dataset in datasets:
         files = [
-            item for item in client.list_files(dataset["uuid"], start_date, end_date, max_files) if item["opendap"]
+            item
+            for item in client.list_files(dataset["uuid"], start_date, end_date, max_files, True)
+            if item["opendap"]
         ]
         if not files:
             continue
@@ -589,15 +627,14 @@ def run_pipeline(
         datasets = client.find_datasets(ecv, start_date, end_date)
         if not datasets:
             raise CedaOpenSearchError(f"No datasets found for ECV {ecv}")
-        if dataset_index is not None:
-            if not 0 <= dataset_index < len(datasets):
-                raise CedaOpenSearchError(f"dataset_index must be between 0 and {len(datasets) - 1}")
-            datasets = [datasets[dataset_index]]
+        datasets = _select_dataset(datasets, dataset_index)
 
     results = []
     for dataset in datasets:
         files = [
-            item for item in client.list_files(dataset["uuid"], start_date, end_date, max_files) if item["opendap"]
+            item
+            for item in client.list_files(dataset["uuid"], start_date, end_date, max_files, True)
+            if item["opendap"]
         ]
         if not files:
             continue

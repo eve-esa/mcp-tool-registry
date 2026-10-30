@@ -48,6 +48,14 @@ FILE_ENTRY = {
     "filesize": 1,
     "opendap": "http://opendap",
 }
+PLAIN_FEATURE = {
+    "properties": {
+        "title": "00README.txt",
+        "date": None,
+        "filesize": 1,
+        "links": {"related": []},
+    }
+}
 NOMINATIM = [
     {
         "display_name": "Rome, Italy",
@@ -188,6 +196,28 @@ class CedaClientTests(unittest.TestCase):
         self.assertEqual(search.call_count, 2)
         self.assertEqual(search.call_args.kwargs["max_records"], 1)
 
+    def test_list_files_opendap_only_scans_past_unreadable_entries(self):
+        client = CedaOpenSearchClient(base_url="http://example.test")
+        pages = [
+            {"features": [PLAIN_FEATURE, PLAIN_FEATURE], "totalResults": 3},
+            {"features": [FILE_FEATURE], "totalResults": 3},
+        ]
+        with patch.object(client, "search", side_effect=pages) as search:
+            files = client.list_files("u1", None, None, 1, True)
+
+        self.assertEqual(files, [FILE_ENTRY])
+        self.assertEqual([entry.kwargs["start_record"] for entry in search.call_args_list], [1, 3])
+        self.assertEqual(search.call_args.kwargs["max_records"], 100)
+
+    def test_list_files_opendap_only_stops_at_scan_ceiling(self):
+        client = CedaOpenSearchClient(base_url="http://example.test")
+        page = {"features": [PLAIN_FEATURE] * 100, "totalResults": 10**9}
+        with patch.object(client, "search", return_value=page) as search:
+            files = client.list_files("u1", None, None, None, True)
+
+        self.assertEqual(files, [])
+        self.assertEqual(search.call_count, ceda_client.FILE_SCAN_LIMIT // 100)
+
     def test_open_subset_selects_nearest_point(self):
         with patch("xarray.open_dataset", return_value=_dataset()):
             result = open_subset("http://opendap", 49.0, 11.0, None)
@@ -237,7 +267,7 @@ class CedaClientTests(unittest.TestCase):
             result = run_pipeline(client, "SM", "start", "end", 1.0, 2.0, None, None, None, 5)
 
         self.assertEqual(result[0]["data"].sizes["time"], 2)
-        client.list_files.assert_called_once_with("u1", "start", "end", 5)
+        client.list_files.assert_called_once_with("u1", "start", "end", 5, True)
         self.assertEqual(subset.call_args.args, ("http://opendap", 1.0, 2.0, None))
 
     def test_run_pipeline_visits_datasets_and_skips_empty_files(self):
@@ -268,6 +298,15 @@ class CedaClientTests(unittest.TestCase):
         self.assertEqual(result[0]["uuid"], "u9")
         client.find_datasets.assert_not_called()
 
+    def test_run_pipeline_single_match_tolerates_out_of_range_index(self):
+        client = _pipeline_client(datasets=[{"uuid": "only", "title": "Only"}])
+        with patch("ceda_client.open_subset") as subset:
+            subset.return_value.load.return_value = "data"
+            result = run_pipeline(client, "SM", "s", "e", None, None, None, None, 3, 5)
+
+        self.assertEqual([item["uuid"] for item in result], ["only"])
+        client.list_files.assert_called_once_with("only", "s", "e", 5, True)
+
     def test_run_pipeline_reports_empty_dataset_files_and_bad_index(self):
         with self.assertRaisesRegex(CedaOpenSearchError, "No datasets"):
             run_pipeline(
@@ -297,9 +336,9 @@ class CedaClientTests(unittest.TestCase):
                 5,
             )
 
-        with self.assertRaisesRegex(CedaOpenSearchError, "dataset_index"):
+        with self.assertRaisesRegex(CedaOpenSearchError, r"out of range.*zero-based.*\[0\] u0"):
             run_pipeline(
-                _pipeline_client(),
+                _pipeline_client(datasets=[{"uuid": f"u{i}", "title": f"T{i}"} for i in range(2)]),
                 "SM",
                 "s",
                 "e",
@@ -381,6 +420,7 @@ class CedaToolTests(unittest.TestCase):
     def test_ceda_run_returns_all_records(self):
         result = self._invoke(bbox="1,2,3,4")
         self.assertEqual(len(result["records"]), 2)
+
     def test_ceda_run_truncates_results(self):
         dataset = xr.Dataset(
             {"sm": ("time", [float(value) for value in range(1200)])},
@@ -691,7 +731,7 @@ class RunExtractionTests(unittest.TestCase):
         kwargs = client.search_datasets.call_args.kwargs
         self.assertEqual(kwargs["query"], "soil")
         self.assertEqual(kwargs["start_date"], "2020-01-01T00:00:00Z")
-        self.assertEqual(client.list_files.call_args.args, ("u1", "2020-01-01T00:00:00Z", None, 2))
+        self.assertEqual(client.list_files.call_args.args, ("u1", "2020-01-01T00:00:00Z", None, 2, True))
 
     def test_extraction_rejects_unknown_variables_and_bad_index(self):
         client = self._client([{"uuid": "u0", "title": "T"}])
@@ -699,8 +739,19 @@ class RunExtractionTests(unittest.TestCase):
         with patch.object(ceda_client, "open_subset", return_value=data):
             with self.assertRaisesRegex(ValueError, "None of"):
                 run_extraction(client, variables=["rainfall"])
-        with self.assertRaisesRegex(CedaOpenSearchError, "dataset_index"):
-            run_extraction(client, dataset_index=9)
+        matches = self._client([{"uuid": f"u{i}", "title": f"T{i}"} for i in range(3)])
+        with self.assertRaisesRegex(CedaOpenSearchError, r"zero-based.*\[0\] u0"):
+            run_extraction(matches, dataset_index=9)
+
+    def test_extraction_single_match_tolerates_out_of_range_index(self):
+        client = self._client([{"uuid": "only", "title": "Only"}])
+        data = xr.Dataset({"sm": (("time",), [0.1])})
+        with patch.object(ceda_client, "open_subset", return_value=data) as subset:
+            results = run_extraction(client, dataset_index=4, max_files=1)
+
+        self.assertEqual([item["uuid"] for item in results], ["only"])
+        self.assertEqual(client.list_files.call_args.args[0], "only")
+        self.assertEqual(subset.call_args.args[0], "http://opendap")
 
     def test_extraction_direct_uuid_skips_search(self):
         client = MagicMock()
@@ -807,7 +858,7 @@ class CedaDatasetToolTests(unittest.TestCase):
                 return text, client
 
         text, client = asyncio.run(call())
-        self.assertEqual(client.list_files.call_args.args, ("u1", "2020-06-01T00:00:00Z", None, 100))
+        self.assertEqual(client.list_files.call_args.args, ("u1", "2020-06-01T00:00:00Z", None, 100, False))
         self.assertIn("[0] f.nc | d | 1.0 B | opendap=yes", text)
         self.assertIn("opendap=no", text)
 
@@ -820,8 +871,51 @@ class CedaDatasetToolTests(unittest.TestCase):
                     await server.ceda_files("u1", start_date="June 2020", limit=limit)
                 return client.list_files.call_args.args
 
-        self.assertEqual(asyncio.run(call(limit=7, elements=None))[-1], 7)
-        self.assertIsNone(asyncio.run(call(limit=None, elements=None))[-1])
+        self.assertEqual(asyncio.run(call(limit=7, elements=None))[3], 7)
+        self.assertIsNone(asyncio.run(call(limit=None, elements=None))[3])
+
+    def test_describe_scans_full_listing_for_readable_files(self):
+        async def call():
+            with (
+                patch.object(server, "CedaOpenSearchClient") as client_cls,
+                patch.object(server, "open_subset") as subset,
+            ):
+                client = client_cls.return_value.__enter__.return_value
+                client.list_files.return_value = [FILE_ENTRY]
+                subset.return_value.load.return_value = _dataset()
+                await server.ceda_describe("u1")
+                return client.list_files.call_args.args
+
+        self.assertEqual(asyncio.run(call()), ("u1", None, None, 1, True))
+
+    def test_describe_parses_and_forwards_dates(self):
+        async def call():
+            with (
+                patch.object(server, "CedaOpenSearchClient") as client_cls,
+                patch.object(server, "open_subset") as subset,
+            ):
+                client = client_cls.return_value.__enter__.return_value
+                client.list_files.return_value = [FILE_ENTRY]
+                subset.return_value.load.return_value = _dataset()
+                await server.ceda_describe("u1", start_date="June 2021", end_date="August 2021")
+                return client.list_files.call_args.args
+
+        self.assertEqual(
+            asyncio.run(call()),
+            ("u1", "2021-06-01T00:00:00Z", "2021-08-01T00:00:00Z", 1, True),
+        )
+
+    def test_files_forwards_opendap_only_filter(self):
+        async def call():
+            with patch.object(server, "CedaOpenSearchClient") as client_cls:
+                client = client_cls.return_value.__enter__.return_value
+                client.list_files.return_value = [FILE_ENTRY]
+                text = await server.ceda_files("u1", opendap_only=True, limit=10)
+                return text, client.list_files.call_args.args
+
+        text, args = asyncio.run(call())
+        self.assertEqual(args, ("u1", None, None, 10, True))
+        self.assertIn("opendap=yes", text)
 
     def test_extract_renders_stats_and_capped_sample(self):
         data = xr.Dataset({"sm": (("t",), [value / 10 for value in range(120)])})
