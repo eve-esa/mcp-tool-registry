@@ -1,6 +1,8 @@
 mcp[cli]>=1.2.0,<2.0.0
 netcdf4>=1.7.3
+numpy>=1.26.0
 pandas>=2.2.0
+python-dateutil>=2.8.2
 python-dotenv>=1.0.0
 requests>=2.32.0
 typing-extensions>=4.12.0

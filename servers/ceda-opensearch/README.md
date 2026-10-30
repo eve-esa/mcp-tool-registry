@@ -1,8 +1,40 @@
 # CEDA CCI OpenSearch MCP server
 
 This directory is a self-contained contribution candidate for the MCP tool
-registry. It exposes `ceda_run`, which finds CCI datasets, selects OPeNDAP
-files by date, and returns a point or bounding-box subset as JSON records.
+registry. It exposes read-only tools over the CEDA OpenSearch catalogue and
+OPeNDAP data service:
+
+- `ceda_run` — finds CCI datasets for an essential climate variable and returns
+  a point or bounding-box subset as JSON records (up to 1000 rows, with a
+  `truncated` flag when more exist).
+- `ceda_search` — searches the whole archive with free text, place names,
+  natural-language dates ("June 2020", "3 days ago"), and OpenSearch facets
+  such as `project`, `sensor`, or `data_type`; returns a numbered list of
+  dataset UUIDs and titles.
+- `ceda_describe` — inspects a dataset through OPeNDAP: dimensions, coordinate
+  ranges, variables with units, and global attributes.
+- `ceda_files` — lists a dataset's files with dates, sizes, and OPeNDAP
+  availability.
+- `ceda_extract` — extracts any dataset and returns per-variable statistics
+  (count, mean, standard deviation, percentiles) plus a pipe-delimited sample
+  of up to 100 rows.
+
+`ceda_search` and `ceda_extract` accept natural-language inputs and can filter
+the full catalogue (`parentIdentifier` is no longer pinned to `cci`).
+
+Result sizes are capped by default and configurable through environment
+variables (set them in `.env`; a value of `0` disables the limit):
+
+| Variable | Default | Caps |
+| --- | --- | --- |
+| `CEDA_MAX_RESULT_ROWS` | 1000 | Records returned by `ceda_run` (sets `truncated`) |
+| `CEDA_MAX_ELEMENTS` | 100 | `ceda_search` `max_results`, `ceda_files` `limit`, `ceda_extract` `max_datasets` and total sample rows |
+| `CEDA_MAX_STATS_VARIABLES` | 10 | Variables listed in `ceda_extract` statistics |
+| `CEDA_MAX_FILES` | 5 | Default `max_files` for `ceda_run` and `ceda_extract` |
+
+Per-call arguments (`max_files`, `max_datasets`, `max_results`, `limit`)
+override the environment defaults and must still be at least 1 when
+provided.
 
 ## Run locally
 
