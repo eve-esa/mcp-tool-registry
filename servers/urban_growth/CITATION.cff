@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: Urban Growth MCP Server
+abstract: >-
+  MCP server that measures how fast a city's built-up area grows year by year
+  and what kind of land it replaces. It uses 10 m annual land cover maps
+  (Esri / Impact Observatory 2017-2023 and ESA WorldCover) from the Microsoft
+  Planetary Computer, and reports built-up area per year, the SDG 11.3.1 land
+  consumption rate, land converted and map links.
+authors:
+  - given-names: Humayun
+    family-names: Sajjad
+    alias: humayun-sajjad
+    affiliation: TU Berlin
+    email: humayunsajjad.official@gmail.com
+keywords:
+  - mcp
+  - earth-observation
+  - urban-growth
+  - land-cover
+  - sdg-11
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/urban_growth
