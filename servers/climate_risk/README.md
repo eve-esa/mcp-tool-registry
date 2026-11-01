@@ -133,3 +133,16 @@ cd mcp-tool-registry
   25.2 °C); anomalies, percentiles and SPI/SPEI, being relative, barely change.
 - **Simple centroid**: the mean of the vertices; enough because it is only used to
   pick the ERA5 cell.
+
+<!-- BEGIN GENERATED CITATION: edit CITATION.cff, then run `python scripts/citation.py servers/<name>` -->
+
+## Authors
+
+- **Cesar Guzman**, [@cguz](https://github.com/cguz), Solenix, [ORCID](https://orcid.org/0000-0002-0552-0967)
+- **Matteo Zuracki**, Serco
+
+## Citation
+
+Citation metadata lives in [`CITATION.cff`](CITATION.cff). Convert it to BibTeX or APA with [cffconvert](https://github.com/citation-file-format/cffconvert): `cffconvert -i CITATION.cff -f bibtex`.
+
+<!-- END GENERATED CITATION -->
