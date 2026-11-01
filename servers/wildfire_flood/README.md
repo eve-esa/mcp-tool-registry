@@ -170,3 +170,16 @@ Register in a local EVE: `POST /mcp-servers` with
 - Open-Meteo's free API is for non-commercial use.
 - Place names come from Nominatim's public service (one request per second,
   attribution required); a busy deployment should use its own instance.
+
+<!-- BEGIN GENERATED CITATION: edit CITATION.cff, then run `python scripts/citation.py servers/<name>` -->
+
+## Authors
+
+- **Cesar Guzman**, [@cguz](https://github.com/cguz), Solenix, [ORCID](https://orcid.org/0000-0002-0552-0967)
+- **Matteo Zuracki**, Serco
+
+## Citation
+
+Citation metadata lives in [`CITATION.cff`](CITATION.cff). Convert it to BibTeX or APA with [cffconvert](https://github.com/citation-file-format/cffconvert): `cffconvert -i CITATION.cff -f bibtex`.
+
+<!-- END GENERATED CITATION -->
