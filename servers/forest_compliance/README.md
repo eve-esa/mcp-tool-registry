@@ -157,3 +157,16 @@ cd mcp-tool-registry
 - **No protected areas or land-tenure check** (WDPA, cadastres): legality under
   the EUDR is not assessed.
 - **Coverage**: latitudes 50°S to 80°N (the Hansen extent).
+
+<!-- BEGIN GENERATED CITATION: edit CITATION.cff, then run `python scripts/citation.py servers/<name>` -->
+
+## Authors
+
+- **Cesar Guzman**, [@cguz](https://github.com/cguz), Solenix, [ORCID](https://orcid.org/0000-0002-0552-0967)
+- **Matteo Zuracki**, Serco
+
+## Citation
+
+Citation metadata lives in [`CITATION.cff`](CITATION.cff). Convert it to BibTeX or APA with [cffconvert](https://github.com/citation-file-format/cffconvert): `cffconvert -i CITATION.cff -f bibtex`.
+
+<!-- END GENERATED CITATION -->
