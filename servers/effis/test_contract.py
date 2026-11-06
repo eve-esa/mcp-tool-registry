@@ -5,8 +5,11 @@ Run: python test_contract.py. No network, EVE or CDSE credentials required.
 
 import argparse
 import asyncio
+import io
 import json
 import os
+import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -18,9 +21,12 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 import httpx
+import numpy as np
+import tifffile
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from PIL import Image
 
 FEATURE = {
     "type": "Feature",
@@ -37,7 +43,32 @@ def provider(request):
         expected = ("hdr-id", "hdr") if case == "credentials-header" else ("env-id", "env")
         return httpx.Response(200, json={"access_token": "fixture"}) if pair == expected else httpx.Response(401)
     if request.url.host == "sh.dataspace.copernicus.eu":
-        return httpx.Response(200, json={"features": []}) if request.url.path.endswith("/search") else httpx.Response(422)
+        if case != "review-metrics":
+            return httpx.Response(200, json={"features": []}) if request.url.path.endswith("/search") else httpx.Response(422)
+        body = json.loads(request.content)
+        if request.url.path.endswith("/search"):
+            start = datetime.fromisoformat(body["datetime"].split("/")[0][:10]) + timedelta(days=1)
+            return httpx.Response(200, json={"features": [{"id": "fixture-scene", "properties": {
+                "datetime": start.strftime("%Y-%m-%dT10:00:00Z"), "eo:cloud_cover": 0}}]})
+        output = body["output"]
+        width, height = output.get("width", 16), output.get("height", 16)
+        buffer = io.BytesIO()
+        if output["responses"][0]["format"]["type"] == "image/png":
+            Image.new("RGB", (width, height), color=(20, 40, 60)).save(buffer, format="PNG")
+            return httpx.Response(200, content=buffer.getvalue(), headers={"Content-Type": "image/png"})
+        script = body["evalscript"]
+        bands = int(re.search(r"bands\s*:\s*(\d+)", script).group(1))
+        start = body["input"]["data"][0]["dataFilter"]["timeRange"]["from"][:10]
+        pre_or_recovered = start < "2021-08-03" or start >= "2022-01-01"
+        if bands == 2:
+            array = np.empty((2, height, width), dtype=np.float32)
+            array[0] = 0.05 if pre_or_recovered else 0.20
+            array[1] = 0.45 if pre_or_recovered else 0.30
+        else:
+            value = 1 if 'bands: ["SCL"' in script else (0.8 if pre_or_recovered else 0.2)
+            array = np.full((height, width), value, dtype=np.float32)
+        tifffile.imwrite(buffer, array, photometric="minisblack", metadata=None)
+        return httpx.Response(200, content=buffer.getvalue(), headers={"Content-Type": "image/tiff"})
     if request.url.host == "nominatim.openstreetmap.org":
         return httpx.Response(200, json=[{"display_name": "Fixture", "lat": "38.8", "lon": "23.3",
                                         "boundingbox": ["38.7", "38.9", "23.2", "23.4"], "importance": 0.9}])
@@ -163,7 +194,7 @@ async def session(transport="stdio", case="normal", headers=None):
         directory.mkdir()
         env = dict(os.environ, CDSE_CLIENT_ID="", CDSE_CLIENT_SECRET="", EFFIS_SHAPEFILE_DIR="",
                    DEFAULT_SAVE_DIR=str(directory), MPLCONFIGDIR=str(Path(base) / "mpl"), EFFIS_CONTRACT_CASE=case)
-        if case.startswith("credentials-"):
+        if case.startswith("credentials-") or case == "review-metrics":
             env.update(CDSE_CLIENT_ID="env-id", CDSE_CLIENT_SECRET="env")
         command = [str(Path(__file__).resolve()), "--serve", "--transport", transport]
         if transport == "stdio":
@@ -419,9 +450,90 @@ async def checks(transport):
     print(f"PASS {transport}: all context/screening tools, arithmetic, provenance, data failures, security, credentials and false-green guards")
 
 
+async def review_metrics(transport):
+    parameters = {"bbox": "0,0,.01,.01", "fire_date": "2021-08-03", "months_before": 1, "months_after": 1,
+                  "metrics": ["ndvi", "regrowth"], "recovery_months": [12], "resolution_m": 0, "width": 16, "height": 16}
+    async with session(transport, "review-metrics") as (client, directory):
+        directory = directory.resolve()
+        baseline = await call(client, "compute_metrics", **parameters)
+        assert baseline["ok"], baseline
+        assert baseline.get("recovery", {}).get("csv_path"), "Fixture must reach recovery/CSV sinks"
+        saved = Path(baseline["saved_json"])
+        complete = json.loads(saved.read_text())
+
+        def paths(value):
+            if isinstance(value, dict):
+                for child in value.values():
+                    yield from paths(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from paths(child)
+            elif isinstance(value, str) and value.startswith(str(directory)):
+                path = Path(value)
+                if path.is_file():
+                    yield path
+
+        outputs = sorted(set(paths(baseline)) | set(paths(complete)) | {
+            saved.parent / "composite_nbr_pre.png", saved.parent / "composite_nbr_post.png"})
+        assert all(p.is_file() for p in outputs), "Every attack target must be a real baseline output"
+        assert any("timeseries" in p.name for p in outputs), baseline["plots"]
+        assert any("composite" in p.name for p in outputs), outputs
+        assert any(p.suffix == ".csv" for p in outputs), outputs
+        assert any("/pre_fire/" in str(p) or "/post_fire/" in str(p) for p in outputs), complete.get("images")
+        directories = {saved.parent}
+        for output in outputs:
+            parent = output.parent
+            while parent != directory and parent.is_relative_to(directory):
+                directories.add(parent)
+                parent = parent.parent
+        targets = [(p, "directory") for p in sorted(directories)] + [(p, "file") for p in outputs]
+        failures = []
+        for target, kind in targets:
+            restored = await call(client, "compute_metrics", **parameters)
+            assert restored["ok"], restored
+            outside = directory.parent / ("outside-" + str(len(failures)) + "-" + str(targets.index((target, kind))))
+            outside.mkdir()
+            sentinel = outside / "sentinel"
+            sentinel.write_bytes(b"must-not-change")
+            if kind == "directory":
+                shutil.rmtree(target)
+                target.symlink_to(outside, target_is_directory=True)
+            else:
+                target.unlink()
+                target.symlink_to(sentinel)
+            try:
+                await client.call_tool("compute_metrics", parameters)
+                unchanged = sentinel.read_bytes() == b"must-not-change" and sorted(p.name for p in outside.iterdir()) == ["sentinel"]
+                if not unchanged:
+                    failures.append(kind + ":" + str(target.relative_to(directory)))
+            finally:
+                if target.is_symlink():
+                    target.unlink()
+        assert not failures, "Outside writes through derived symlinks: " + ", ".join(failures)
+    print(f"PASS {transport}: derived metric directory and every published file/plot/composite sink confined")
+
+
 async def main():
+    failures = []
     for transport in ("stdio", "http"):
-        await checks(transport)
+        try:
+            if args.only == "review-metrics":
+                await review_metrics(transport)
+            else:
+                await checks(transport)
+                await review_metrics(transport)
+        except Exception as exc:
+            pending, messages = [exc], []
+            while pending:
+                error = pending.pop()
+                if getattr(error, "exceptions", None):
+                    pending.extend(error.exceptions)
+                else:
+                    messages.append(str(error))
+            detail = "; ".join(messages)
+            failures.append((transport, detail))
+            print(f"FAIL {transport}: {detail}", flush=True)
+    assert not failures, failures
 
 
 if __name__ == "__main__":
@@ -429,6 +541,7 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--only", choices=["review-metrics"])
     args = parser.parse_args()
     if args.serve:
         serve(args.transport, args.port)

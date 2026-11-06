@@ -1404,6 +1404,7 @@ def _generate_metric_plots(
     import matplotlib.pyplot as plt
 
     fire_dt = datetime.strptime(fire_date, "%Y-%m-%d")
+    save_dir = _artifact_path(str(save_dir))
     save_dir.mkdir(parents=True, exist_ok=True)
     plots: dict[str, str] = {}
 
@@ -1463,12 +1464,14 @@ def _generate_metric_plots(
         ax.xaxis.set_major_locator(mdates.AutoDateLocator())
         fig.autofmt_xdate(rotation=30)
 
-        filepath = save_dir / f"{metric_name}_timeseries_{fire_date}.png"
-        fig.savefig(
-            str(filepath), dpi=150, bbox_inches="tight",
-            facecolor="white", edgecolor="none",
-        )
-        plt.close(fig)
+        try:
+            filepath = _artifact_path(str(save_dir / f"{metric_name}_timeseries_{fire_date}.png"))
+            fig.savefig(
+                str(filepath), dpi=150, bbox_inches="tight",
+                facecolor="white", edgecolor="none",
+            )
+        finally:
+            plt.close(fig)
         plots[metric_name] = str(filepath)
 
     return plots
@@ -1890,6 +1893,7 @@ def _generate_recovery_plot(
     if recovery_df.empty:
         return None
 
+    save_dir = _artifact_path(str(save_dir))
     save_dir.mkdir(parents=True, exist_ok=True)
 
     months: list[int] = []
@@ -1924,9 +1928,11 @@ def _generate_recovery_plot(
     ax2.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    filepath = save_dir / f"recovery_{fire_date}.png"
-    fig.savefig(str(filepath), dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none")
-    plt.close(fig)
+    try:
+        filepath = _artifact_path(str(save_dir / f"recovery_{fire_date}.png"))
+        fig.savefig(str(filepath), dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none")
+    finally:
+        plt.close(fig)
     return str(filepath)
 
 
@@ -2132,7 +2138,10 @@ async def compute_metrics(
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    series_dir = out_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"
+    try:
+        series_dir = _artifact_path(str(out_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"))
+    except (OSError, ValueError):
+        return _tool_error("invalid_path", "Derived metrics directory escapes the artifact root")
 
     proc_bounds, proc_size, grid_meta = _process_grid(
         [west, south, east, north], resolution_m, width, height,
@@ -2267,7 +2276,8 @@ async def compute_metrics(
         for label, comp in [("pre", pre_composite), ("post", post_composite)]:
             vis = np.nan_to_num(comp, nan=-1.0).astype(np.float64)
             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-            PILImage.fromarray(vis, mode="L").save(str(series_dir / f"composite_nbr_{label}.png"))
+            target = _artifact_path(str(series_dir / f"composite_nbr_{label}.png"))
+            PILImage.fromarray(vis, mode="L").save(str(target))
 
         if burn_threshold and burn_threshold > 0:
             burn_mask = _compute_burn_mask(pre_composite, post_composite, burn_threshold)
@@ -2278,7 +2288,7 @@ async def compute_metrics(
         n_total = int(burn_mask.size)
         logger.info("  Burn mask: %d/%d pixels (%.1f%%)", n_burned, n_total, 100.0 * n_burned / max(n_total, 1))
 
-        mask_path = series_dir / "burn_mask.png"
+        mask_path = _artifact_path(str(series_dir / "burn_mask.png"))
         PILImage.fromarray((burn_mask.astype(np.uint8) * 255), mode="L").save(str(mask_path))
 
         result["burn_mask"] = {
@@ -2314,7 +2324,7 @@ async def compute_metrics(
     if burn_mask is not None and pre_composite is not None and post_composite is not None:
         try:
             severity_map = _compute_severity_map(pre_composite, post_composite)
-            sev_path = series_dir / "severity_map.png"
+            sev_path = _artifact_path(str(series_dir / "severity_map.png"))
             series_dir.mkdir(parents=True, exist_ok=True)
             sev_vis = np.zeros((*severity_map.shape, 3), dtype=np.uint8)
             sev_vis[severity_map == 1] = [255, 255, 0]
@@ -2401,7 +2411,7 @@ async def compute_metrics(
                         recovery_df = build_recovery_table(
                             img_pre, img_dist_ndvi, imgs_post_recovery, burn_mask, _RECOVERY_BANDS, severity_map,
                         )
-                        recovery_dir = series_dir / "recovery"
+                        recovery_dir = _artifact_path(str(series_dir / "recovery"))
                         recovery_dir.mkdir(parents=True, exist_ok=True)
 
                         def _save_ndvi_composite(img_2band, tag, out_dir):
@@ -2411,14 +2421,14 @@ async def compute_metrics(
                             ndvi = np.where(np.abs(denom) > 1e-10, (nir - red) / denom, np.nan)
                             vis = np.nan_to_num(ndvi, nan=-1.0)
                             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-                            path = out_dir / f"composite_ndvi_{tag}.png"
+                            path = _artifact_path(str(out_dir / f"composite_ndvi_{tag}.png"))
                             PILImage.fromarray(vis, mode="L").save(str(path))
                             return str(path)
 
                         def _save_ndvi(ndvi, tag, out_dir):
                             vis = np.nan_to_num(ndvi.astype(np.float64), nan=-1.0)
                             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-                            path = out_dir / f"composite_ndvi_{tag}.png"
+                            path = _artifact_path(str(out_dir / f"composite_ndvi_{tag}.png"))
                             PILImage.fromarray(vis, mode="L").save(str(path))
                             return str(path)
 
@@ -2428,7 +2438,7 @@ async def compute_metrics(
                         for ts_label, ts_img in imgs_post_recovery.items():
                             safe_tag = ts_label.replace("+", "plus_").replace(" ", "_")
                             composite_paths[ts_label] = _save_ndvi_composite(ts_img, safe_tag, recovery_dir)
-                        csv_path = recovery_dir / f"recovery_{fire_date}.csv"
+                        csv_path = _artifact_path(str(recovery_dir / f"recovery_{fire_date}.csv"))
                         recovery_df.to_csv(str(csv_path), index=False)
                         recovery_plot = _generate_recovery_plot(recovery_df, fire_date, recovery_dir)
                         result["recovery"] = {
@@ -2516,7 +2526,7 @@ async def compute_metrics(
             "bounds": proc_bounds,
             "data": [{"type": "sentinel-2-l2a", "dataFilter": {"timeRange": {"from": f"{scene_date}T00:00:00Z", "to": f"{scene_date}T23:59:59Z"}, "maxCloudCoverage": max_cloud_cover, "mosaickingOrder": "leastCC"}}],
         }
-        phase_dir = series_dir / phase / metric_name
+        phase_dir = _artifact_path(str(series_dir / phase / metric_name))
         phase_dir.mkdir(parents=True, exist_ok=True)
         async with _sem:
             async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
@@ -2527,7 +2537,7 @@ async def compute_metrics(
                 )
         if resp.status_code != 200:
             return None
-        filepath = phase_dir / f"{metric_name}_{scene_date}.png"
+        filepath = _artifact_path(str(phase_dir / f"{metric_name}_{scene_date}.png"))
         filepath.write_bytes(resp.content)
         return {"phase": phase, "date": scene_date, "metric": metric_name, "cloud_cover_pct": cloud_cover, "path": str(filepath), "size_bytes": len(resp.content)}
 
@@ -2614,7 +2624,7 @@ async def compute_metrics(
     result["summary"] = summary
 
     series_dir.mkdir(parents=True, exist_ok=True)
-    filepath = series_dir / f"metrics_{fire_date}.json"
+    filepath = _artifact_path(str(series_dir / f"metrics_{fire_date}.json"))
     filepath.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
 
     compact = {
