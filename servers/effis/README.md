@@ -69,12 +69,16 @@ Narrow the bbox when coverage is unsupported. Categorical downsampling and
 spherical clipped-bbox area weighting are approximate, not validated accuracy.
 No worldwide availability or complete small-fire/QA guarantee is established.
 
-**Observed live-provider limitation:** WorldCover succeeded in local historical
-Evia checks, but PC's statistics endpoint rejected the published MODIS Burn_Date
-asset with HTTP 400 (ingestion source not registered). No live MODIS success was
-verified. The tool returns `burned_area_unavailable` and safe HTTP status metadata,
-not a fabricated zero; a supported provider path/configuration or an explicitly
-approved alternative is needed. No bypass or direct-raster stack is introduced.
+**Live provider checks:** the documented PC GeoJSON statistics route previously
+returned HTTP 400 for the published MODIS asset, but recovered on recheck. Real
+MCP requests for inland Evia samples in August 2021 returned monthly aggregates
+with one tile and recorded burn days; WorldCover also succeeded. These checks
+establish supported access for those samples, not universal coverage or accuracy.
+A broader coastal bbox remained unavailable under the conservative valid-data
+and categorical guards. Missing/water-category or incomplete statistics may be
+rejected rather than converted to zero. Provider failures return structured
+unavailable results and safe HTTP status metadata. No alternate stack, access
+bypass, new credentials or individual perimeter is introduced.
 
 `estimate_fire_emissions` accepts caller area/bbox/date and explicit fuel shares,
 or the WorldCover proxy. Area is not authenticated as an EFFIS event. All numeric
