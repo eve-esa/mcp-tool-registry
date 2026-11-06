@@ -48,6 +48,7 @@ import tifffile
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from PIL import Image as PILImage
+from screening import detect_burned_area, estimate_fire_emissions, get_burn_fuel_types
 
 # Headless server: select Agg before any pyplot import (matplotlib.use docs).
 matplotlib.use("Agg")
@@ -110,6 +111,9 @@ logger = logging.getLogger("fire-mcp")
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP("Fire Detection Server", host="0.0.0.0", port=8000, stateless_http=True)
+mcp.tool()(estimate_fire_emissions)
+mcp.tool()(get_burn_fuel_types)
+mcp.tool()(detect_burned_area)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +189,63 @@ def _tool_error(error_type: str, error: str, **extra) -> str:
     payload = {"ok": False, "error_type": error_type, "error": error}
     payload.update(extra)
     return json.dumps(payload)
+
+
+def _artifact_path(value: str | None = None, *, existing: bool = False) -> Path:
+    """All caller-controlled diagnostic paths stay under the operator's root."""
+    root = DEFAULT_SAVE_DIR.expanduser().resolve()
+    if value is not None and "://" in str(value):
+        raise ValueError("URLs are not server-local artifact references")
+    path = Path(value).expanduser() if value is not None else root
+    path = path.resolve(strict=existing)
+    if not path.is_relative_to(root):
+        raise ValueError("Artifact reference escapes the configured artifact root")
+    return path
+
+
+def _perimeter_provenance(feature: dict) -> dict:
+    """Identity of the already-bounded normalized input, not EFFIS authentication."""
+    identifier = feature.get("id")
+    if not isinstance(identifier, str) or len(identifier.encode()) > 512:
+        identifier = None
+    canonical = json.dumps(feature, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return {"feature_id": identifier, "fingerprint": hashlib.sha256(canonical).hexdigest(),
+            "fingerprint_method": "SHA-256 sorted compact JSON of supplied bounded Feature (including properties)",
+            "authenticated": False, "scope": "Caller-supplied identity; not verified EFFIS event or geometry-equivalence proof"}
+
+
+def _bounded_perimeter(feature: dict) -> dict:
+    """Bounded WGS84 GeoJSON input, not proof of EFFIS provenance."""
+    from shapely.geometry import shape
+
+    if not isinstance(feature, dict) or feature.get("type") != "Feature" or feature.get("crs"):
+        raise ValueError("Supply one WGS84 GeoJSON Feature")
+    if feature.get("properties") is not None and not isinstance(feature["properties"], dict):
+        raise ValueError("Feature properties must be an object or null")
+    if len(json.dumps(feature, allow_nan=False).encode()) > 256_000:
+        raise ValueError("Perimeter exceeds 256000 bytes")
+    geometry = feature.get("geometry", {})
+    if geometry.get("type") not in {"Polygon", "MultiPolygon"} or geometry.get("crs"):
+        raise ValueError("Perimeter must be a WGS84 Polygon or MultiPolygon")
+    polygons = [geometry["coordinates"]] if geometry["type"] == "Polygon" else geometry["coordinates"]
+    vertices = 0
+    for polygon in polygons:
+        for ring in polygon:
+            if len(ring) < 4 or ring[0] != ring[-1]:
+                raise ValueError("Polygon rings must be closed and have at least four positions")
+            vertices += len(ring)
+            for point in ring:
+                if len(point) != 2 or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                                          or not math.isfinite(v) for v in point):
+                    raise ValueError("Coordinates must be finite longitude/latitude pairs")
+                if not (-180 <= point[0] <= 180 and -80 < point[1] < 84):
+                    raise ValueError("Perimeter outside supported WGS84 bounds")
+    if vertices > 10_000:
+        raise ValueError("Perimeter exceeds 10000 vertices")
+    polygon = shape(geometry)
+    if polygon.is_empty or not polygon.is_valid or polygon.bounds[2] - polygon.bounds[0] >= 6:
+        raise ValueError("Invalid or excessively wide perimeter")
+    return {**feature, "properties": feature.get("properties") or {}}
 
 
 # Axis-aligned lon/lat width scales with cos(latitude); warn above this.
@@ -406,6 +467,12 @@ def _gml_to_geojson(gml_text: str) -> dict:
     import xml.etree.ElementTree as ET
 
     root = ET.fromstring(gml_text)
+    if root.tag not in {"{http://www.opengis.net/wfs}FeatureCollection",
+                        "{http://www.opengis.net/gml}FeatureCollection"}:
+        raise ValueError("Expected a WFS/GML FeatureCollection, not a provider exception or unrelated XML")
+    if any(element.tag.rsplit("}", 1)[-1] in {"ServiceExceptionReport", "ExceptionReport"}
+           for element in root.iter()):
+        raise ValueError("OGC exception report is not fire data")
     ns = {
         "gml": "http://www.opengis.net/gml",
         "ms": "http://mapserver.gis.umn.edu/mapserver",
@@ -414,6 +481,12 @@ def _gml_to_geojson(gml_text: str) -> dict:
     geojson_features = []
 
     members = root.findall(".//gml:featureMember", ns) or root.findall(".//{http://www.opengis.net/gml}featureMember")
+    if not members:
+        if any(child.tag != "{http://www.opengis.net/gml}boundedBy" for child in root):
+            raise ValueError("Unrecognized feature content must not become an empty collection")
+        for key in ["numberOfFeatures", "numberReturned", "numberMatched"]:
+            if key in root.attrib and root.attrib[key] != "unknown" and int(root.attrib[key]) != 0:
+                raise ValueError("Declared feature count does not describe an empty collection")
 
     for member in members:
         feat_elem = member[0] if len(member) > 0 else member
@@ -639,6 +712,7 @@ async def get_effis_burnt_areas(
     buffer_km: float = 5.0,
     save_dir: str | None = None,
     shapefile_dir: str | None = None,
+    include_perimeter: bool = False,
 ) -> str:
     """
     Detect burnt areas from EFFIS and return per-fire bboxes + metadata.
@@ -646,7 +720,12 @@ async def get_effis_burnt_areas(
     Fetches burnt area polygons from EFFIS, saves the full GeoJSON to disk,
     and returns a compact list of fires sorted by area (largest first).
     Each fire entry includes a bbox string ready to pass directly to
-    compute_metrics or other downstream tools.
+    compute_metrics or other downstream tools. With include_perimeter=True,
+    request max_features=1: one bounded GeoJSON Feature is returned inline,
+    without a file handoff. Bounds: 256000 bytes, 10000 vertices per Feature.
+    Requests allow 1–500 features and 0–100 km buffer. Caller artifact/cache
+    overrides must stay beneath operator-configured roots. Legacy saved paths
+    are server-local diagnostics, not download URLs or persistence guarantees.
 
     Workflow:
         1. Call get_effis_burnt_areas(date=...) → fires with bboxes
@@ -684,6 +763,35 @@ async def get_effis_burnt_areas(
         cross the antimeridian also include ``bboxes`` and
         ``antimeridian_split``.
     """
+
+    # Guard producer paths even for inline requests; overrides are not authority.
+    try:
+        out_dir = _artifact_path(save_dir)
+        if shapefile_dir is not None and (
+            not EFFIS_SHAPEFILE_DIR or not Path(shapefile_dir).expanduser().resolve().is_relative_to(
+                Path(EFFIS_SHAPEFILE_DIR).expanduser().resolve()
+            )
+        ):
+            raise ValueError("Cache override escapes the operator-configured cache root")
+    except (OSError, ValueError):
+        return _tool_error("invalid_path", "Use operator-configured artifact/cache roots")
+    try:
+        west, south, east, north = [float(v) for v in bbox.split(",")]
+        if not all(math.isfinite(v) for v in (west, south, east, north)) or not (
+            -180 <= west < east <= 180 and -90 <= south < north <= 90
+        ):
+            raise ValueError("Invalid bbox")
+        if not 1 <= max_features <= 500 or not math.isfinite(buffer_km) or not 0 <= buffer_km <= 100:
+            raise ValueError("Request exceeds documented limits")
+        if include_perimeter and max_features != 1:
+            raise ValueError("Inline perimeter requires max_features=1")
+        if date and date.strip().lower() not in {"today", "week", "month"}:
+            value = date.strip()
+            fmt = {4: "%Y", 7: "%Y-%m", 10: "%Y-%m-%d"}.get(len(value))
+            if not fmt or datetime.strptime(value, fmt).strftime(fmt) != value:
+                raise ValueError("Use an ISO date prefix")
+    except (ValueError, TypeError):
+        return _tool_error("invalid_input", "Use finite bbox/buffer, 1–500 features, valid date; inline requires 1 feature")
 
     # Resolve date shortcuts and build WFS params
     wfs_layer = "ms:modis.ba.poly"
@@ -875,18 +983,20 @@ async def get_effis_burnt_areas(
 
         # Save full GeoJSON to file (keeps verbose polygon coordinates out
         # of the tool response that the model sees).
-        out_dir = Path(save_dir) if save_dir else DEFAULT_SAVE_DIR
-        out_dir.mkdir(parents=True, exist_ok=True)
-        filepath = out_dir / f"burnt_areas_{date_label}_{_bbox_hash8(bbox, str(max_features))}.geojson"
-        filepath.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+        if not include_perimeter:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            filepath = out_dir / f"burnt_areas_{date_label}_{_bbox_hash8(bbox, str(max_features))}.geojson"
+            filepath = _artifact_path(str(filepath))
+            filepath.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+            result["saved_geojson"] = str(filepath)
+            result["artifact_scope"] = "server-local only; not a download URL or persistence guarantee"
 
         result["total_features"] = n_features
-        result["saved_geojson"] = str(filepath)
 
         # Extract per-fire bounding boxes with metadata (sorted by area,
         # largest first). Each bbox is ready to pass to compute_metrics.
         fires = []
-        for feat in features:
+        for feature_index, feat in enumerate(features):
             props = feat.get("properties", {})
             geom = feat.get("geometry")
             if not geom:
@@ -914,7 +1024,11 @@ async def get_effis_burnt_areas(
                 min(all_lons), min(all_lats), max(all_lons), max(all_lats),
                 buffer_km,
             ))
+            if include_perimeter:
+                rec["perimeter"] = _bounded_perimeter(feat)
+                rec["perimeter_provenance"] = _perimeter_provenance(rec["perimeter"])
             rec.update({
+                "feature_index": feature_index,
                 "area_ha": area_ha,
                 "commune": props.get("COMMUNE", props.get("PROVINCE", "")),
                 "country": props.get("COUNTRY", ""),
@@ -928,6 +1042,7 @@ async def get_effis_burnt_areas(
 
     except Exception as exc:
         result["geojson_error"] = str(exc)
+        result.update(ok=False, error_type="lookup_unavailable", error="EFFIS result could not be obtained/validated")
 
     return json.dumps(result, default=str)
 
@@ -1313,6 +1428,7 @@ def _generate_metric_plots(
     import matplotlib.pyplot as plt
 
     fire_dt = datetime.strptime(fire_date, "%Y-%m-%d")
+    save_dir = _artifact_path(str(save_dir))
     save_dir.mkdir(parents=True, exist_ok=True)
     plots: dict[str, str] = {}
 
@@ -1372,12 +1488,14 @@ def _generate_metric_plots(
         ax.xaxis.set_major_locator(mdates.AutoDateLocator())
         fig.autofmt_xdate(rotation=30)
 
-        filepath = save_dir / f"{metric_name}_timeseries_{fire_date}.png"
-        fig.savefig(
-            str(filepath), dpi=150, bbox_inches="tight",
-            facecolor="white", edgecolor="none",
-        )
-        plt.close(fig)
+        try:
+            filepath = _artifact_path(str(save_dir / f"{metric_name}_timeseries_{fire_date}.png"))
+            fig.savefig(
+                str(filepath), dpi=150, bbox_inches="tight",
+                facecolor="white", edgecolor="none",
+            )
+        finally:
+            plt.close(fig)
         plots[metric_name] = str(filepath)
 
     return plots
@@ -1799,6 +1917,7 @@ def _generate_recovery_plot(
     if recovery_df.empty:
         return None
 
+    save_dir = _artifact_path(str(save_dir))
     save_dir.mkdir(parents=True, exist_ok=True)
 
     months: list[int] = []
@@ -1833,9 +1952,11 @@ def _generate_recovery_plot(
     ax2.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    filepath = save_dir / f"recovery_{fire_date}.png"
-    fig.savefig(str(filepath), dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none")
-    plt.close(fig)
+    try:
+        filepath = _artifact_path(str(save_dir / f"recovery_{fire_date}.png"))
+        fig.savefig(str(filepath), dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none")
+    finally:
+        plt.close(fig)
     return str(filepath)
 
 
@@ -1960,6 +2081,10 @@ async def compute_metrics(
     if recovery_months is None:
         recovery_months = [12, 24, 36, 48]
 
+    try:
+        out_dir = _artifact_path(save_dir)
+    except (OSError, ValueError):
+        return _tool_error("invalid_path", "Use the operator-configured artifact root")
     cdse_cid, cdse_csec = _resolve_cdse_creds()
     if not cdse_cid or not cdse_csec:
         return _tool_error(
@@ -2036,9 +2161,11 @@ async def compute_metrics(
         "plots": {}, "summary": {},
     }
 
-    out_dir = Path(save_dir) if save_dir else Path(DEFAULT_SAVE_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
-    series_dir = out_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"
+    try:
+        series_dir = _artifact_path(str(out_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"))
+    except (OSError, ValueError):
+        return _tool_error("invalid_path", "Derived metrics directory escapes the artifact root")
 
     proc_bounds, proc_size, grid_meta = _process_grid(
         [west, south, east, north], resolution_m, width, height,
@@ -2173,7 +2300,8 @@ async def compute_metrics(
         for label, comp in [("pre", pre_composite), ("post", post_composite)]:
             vis = np.nan_to_num(comp, nan=-1.0).astype(np.float64)
             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-            PILImage.fromarray(vis, mode="L").save(str(series_dir / f"composite_nbr_{label}.png"))
+            target = _artifact_path(str(series_dir / f"composite_nbr_{label}.png"))
+            PILImage.fromarray(vis, mode="L").save(str(target))
 
         if burn_threshold and burn_threshold > 0:
             burn_mask = _compute_burn_mask(pre_composite, post_composite, burn_threshold)
@@ -2184,7 +2312,7 @@ async def compute_metrics(
         n_total = int(burn_mask.size)
         logger.info("  Burn mask: %d/%d pixels (%.1f%%)", n_burned, n_total, 100.0 * n_burned / max(n_total, 1))
 
-        mask_path = series_dir / "burn_mask.png"
+        mask_path = _artifact_path(str(series_dir / "burn_mask.png"))
         PILImage.fromarray((burn_mask.astype(np.uint8) * 255), mode="L").save(str(mask_path))
 
         result["burn_mask"] = {
@@ -2220,7 +2348,7 @@ async def compute_metrics(
     if burn_mask is not None and pre_composite is not None and post_composite is not None:
         try:
             severity_map = _compute_severity_map(pre_composite, post_composite)
-            sev_path = series_dir / "severity_map.png"
+            sev_path = _artifact_path(str(series_dir / "severity_map.png"))
             series_dir.mkdir(parents=True, exist_ok=True)
             sev_vis = np.zeros((*severity_map.shape, 3), dtype=np.uint8)
             sev_vis[severity_map == 1] = [255, 255, 0]
@@ -2307,7 +2435,7 @@ async def compute_metrics(
                         recovery_df = build_recovery_table(
                             img_pre, img_dist_ndvi, imgs_post_recovery, burn_mask, _RECOVERY_BANDS, severity_map,
                         )
-                        recovery_dir = series_dir / "recovery"
+                        recovery_dir = _artifact_path(str(series_dir / "recovery"))
                         recovery_dir.mkdir(parents=True, exist_ok=True)
 
                         def _save_ndvi_composite(img_2band, tag, out_dir):
@@ -2317,14 +2445,14 @@ async def compute_metrics(
                             ndvi = np.where(np.abs(denom) > 1e-10, (nir - red) / denom, np.nan)
                             vis = np.nan_to_num(ndvi, nan=-1.0)
                             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-                            path = out_dir / f"composite_ndvi_{tag}.png"
+                            path = _artifact_path(str(out_dir / f"composite_ndvi_{tag}.png"))
                             PILImage.fromarray(vis, mode="L").save(str(path))
                             return str(path)
 
                         def _save_ndvi(ndvi, tag, out_dir):
                             vis = np.nan_to_num(ndvi.astype(np.float64), nan=-1.0)
                             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-                            path = out_dir / f"composite_ndvi_{tag}.png"
+                            path = _artifact_path(str(out_dir / f"composite_ndvi_{tag}.png"))
                             PILImage.fromarray(vis, mode="L").save(str(path))
                             return str(path)
 
@@ -2334,7 +2462,7 @@ async def compute_metrics(
                         for ts_label, ts_img in imgs_post_recovery.items():
                             safe_tag = ts_label.replace("+", "plus_").replace(" ", "_")
                             composite_paths[ts_label] = _save_ndvi_composite(ts_img, safe_tag, recovery_dir)
-                        csv_path = recovery_dir / f"recovery_{fire_date}.csv"
+                        csv_path = _artifact_path(str(recovery_dir / f"recovery_{fire_date}.csv"))
                         recovery_df.to_csv(str(csv_path), index=False)
                         recovery_plot = _generate_recovery_plot(recovery_df, fire_date, recovery_dir)
                         result["recovery"] = {
@@ -2422,7 +2550,7 @@ async def compute_metrics(
             "bounds": proc_bounds,
             "data": [{"type": "sentinel-2-l2a", "dataFilter": {"timeRange": {"from": f"{scene_date}T00:00:00Z", "to": f"{scene_date}T23:59:59Z"}, "maxCloudCoverage": max_cloud_cover, "mosaickingOrder": "leastCC"}}],
         }
-        phase_dir = series_dir / phase / metric_name
+        phase_dir = _artifact_path(str(series_dir / phase / metric_name))
         phase_dir.mkdir(parents=True, exist_ok=True)
         async with _sem:
             async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
@@ -2433,7 +2561,7 @@ async def compute_metrics(
                 )
         if resp.status_code != 200:
             return None
-        filepath = phase_dir / f"{metric_name}_{scene_date}.png"
+        filepath = _artifact_path(str(phase_dir / f"{metric_name}_{scene_date}.png"))
         filepath.write_bytes(resp.content)
         return {"phase": phase, "date": scene_date, "metric": metric_name, "cloud_cover_pct": cloud_cover, "path": str(filepath), "size_bytes": len(resp.content)}
 
@@ -2520,7 +2648,7 @@ async def compute_metrics(
     result["summary"] = summary
 
     series_dir.mkdir(parents=True, exist_ok=True)
-    filepath = series_dir / f"metrics_{fire_date}.json"
+    filepath = _artifact_path(str(series_dir / f"metrics_{fire_date}.json"))
     filepath.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
 
     compact = {
@@ -2550,8 +2678,407 @@ async def compute_metrics(
     return json.dumps(compact, default=str)
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Mapped exposure
 # ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_fire_weather(
+    latitude: float, longitude: float, start_date: str,
+    end_date: str | None = None, lookback_days: int = 30,
+) -> str:
+    """ERA5 regional context, not local fuel moisture or a spread forecast.
+
+    Inclusive UTC past event dates (1–31 days), antecedent rain 1–90 days.
+    Null is unknown, not zero. Recent reanalysis can be unavailable.
+    """
+    from datetime import UTC
+
+    if not (math.isfinite(latitude) and math.isfinite(longitude)
+            and -90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return _tool_error("invalid_location", "Supply finite coordinates in range")
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date or start_date, "%Y-%m-%d").date()
+        if start.isoformat() != start_date or end.isoformat() != (end_date or start_date):
+            raise ValueError("Use ISO dates")
+        if not 0 <= (end - start).days < 31 or end >= datetime.now(UTC).date() or not 1 <= lookback_days <= 90:
+            raise ValueError("Request window outside bounds")
+        before = start - timedelta(days=lookback_days)
+        if before.year < 1940:
+            raise ValueError("Outside ERA5 coverage")
+    except (ValueError, OverflowError):
+        return _tool_error("invalid_dates", "Use 1–31 past ISO event days and 1–90 lookback days within ERA5 coverage")
+    units = {"temperature_2m": "°C", "relative_humidity_2m": "%", "wind_speed_10m": "m/s",
+             "wind_direction_10m": "°", "wind_gusts_10m": "m/s", "precipitation": "mm"}
+    try:
+        response = await _http_get("https://archive-api.open-meteo.com/v1/archive", params={
+            "latitude": latitude, "longitude": longitude, "start_date": before.isoformat(), "end_date": end.isoformat(),
+            "hourly": ",".join(units), "daily": "precipitation_sum", "models": "era5", "timezone": "UTC",
+            "wind_speed_unit": "ms",
+        })
+        data = response.json()
+        hourly, daily = data["hourly"], data["daily"]
+        hours = pd.date_range(before, end + timedelta(days=1), freq="h", inclusive="left")
+        days = pd.date_range(before, end, freq="D")
+        if (data["utc_offset_seconds"] != 0 or hourly["time"] != hours.strftime("%Y-%m-%dT%H:%M").tolist()
+                or daily["time"] != days.strftime("%Y-%m-%d").tolist()
+                or any(data["hourly_units"].get(k) != v for k, v in units.items())
+                or data["daily_units"].get("precipitation_sum") != "mm"):
+            raise ValueError("Unexpected dates or units")
+        for table, columns in [(hourly, units), (daily, ["precipitation_sum"])]:
+            for key in columns:
+                values = table[key]
+                if len(values) != len(table["time"]) or any(
+                    v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v))
+                    for v in values
+                ):
+                    raise ValueError("Unexpected numeric values")
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+        return _tool_error("weather_unavailable", "ERA5 data unavailable or dates/units/values unexpected")
+    event = {k: hourly[k][lookback_days * 24:] for k in ["time", *units]}
+    antecedent = {k: daily[k][:lookback_days] for k in ["time", "precipitation_sum"]}
+    missing = {k: sum(v is None for v in event[k]) for k in units}
+    rain = antecedent["precipitation_sum"]
+    missing["antecedent_rain_days"] = sum(v is None for v in rain)
+    warnings = ["ERA5 is regional reanalysis (~25 km), not local fire behaviour or fuel moisture. "
+                "Wind direction is where wind comes FROM."]
+    if any(missing.values()):
+        warnings.append("Missing values are unknown, not zero; recent ERA5 can be delayed")
+    if all(v is None for k in units for v in event[k]):
+        return _tool_error("weather_unavailable", "No event-hour ERA5 values", missing=missing, warnings=warnings)
+    ranges = {}
+    for key in units:
+        values = [v for v in event[key] if v is not None]
+        ranges[key] = {"min": min(values, default=None), "max": max(values, default=None)}
+    return json.dumps({
+        "ok": True, "source": "Open-Meteo / ECMWF ERA5", "timezone": "UTC", "event_ranges": ranges,
+        "event_rain_mm": sum(event["precipitation"]) if not missing["precipitation"] else None,
+        "latitude": latitude, "longitude": longitude, "grid_latitude": data.get("latitude"),
+        "grid_longitude": data.get("longitude"), "start_date": start_date, "end_date": end.isoformat(),
+        "hourly": event, "hourly_units": units, "antecedent_daily": antecedent,
+        "antecedent_rain_mm": sum(rain) if not missing["antecedent_rain_days"] else None,
+        "missing": missing, "warnings": warnings,
+        "attribution": "Weather data by Open-Meteo.com and ECMWF ERA5 (CC BY 4.0)",
+        "source_url": "https://open-meteo.com/", "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+    }, allow_nan=False)
+
+
+async def _air_quality_data(latitude, longitude, start_date, end_date, baseline_days, pollutants):
+    """One provider/validation/statistics path for both public AQ interfaces."""
+    from datetime import UTC
+
+    try:
+        if not (math.isfinite(latitude) and math.isfinite(longitude)
+                and -90 <= latitude <= 90 and -180 <= longitude <= 180):
+            raise ValueError("Invalid coordinates")
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        before = start - timedelta(days=baseline_days)
+        if (start.isoformat() != start_date or end.isoformat() != end_date
+                or not 0 <= (end - start).days < 31 or end >= datetime.now(UTC).date()
+                or not 1 <= baseline_days <= 60 or before.year < 2013):
+            raise ValueError("Unsupported dates/window")
+    except (ValueError, TypeError, OverflowError):
+        return {"ok": False, "error_type": "invalid_input", "error": "Use valid coordinates, past ISO dates and bounded windows"}
+    try:
+        response = await _http_get("https://air-quality-api.open-meteo.com/v1/air-quality", params={
+            "latitude": latitude, "longitude": longitude, "start_date": before.isoformat(), "end_date": end_date,
+            "hourly": ",".join(pollutants), "domains": "cams_europe", "timezone": "GMT",
+        })
+        data = response.json()
+        hours = pd.date_range(before, end + timedelta(days=1), freq="h", inclusive="left").strftime("%Y-%m-%dT%H:%M").tolist()
+        hourly = data["hourly"]
+        if data["utc_offset_seconds"] != 0 or hourly["time"] != hours:
+            raise ValueError("Incomplete/shifted times")
+        for key in pollutants:
+            values = hourly[key]
+            if (data["hourly_units"][key] not in {"μg/m³", "µg/m³"} or len(values) != len(hours)
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or not math.isfinite(v) or v < 0 for v in values)):
+                raise ValueError("Missing/invalid concentrations or units")
+        frame = pd.DataFrame({k: hourly[k] for k in pollutants}, index=hours, dtype=float)
+    except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError):
+        return {"ok": False, "error_type": "air_quality_unavailable",
+                "error": "CAMS Europe data unavailable/incomplete or units/times/values unexpected; no comparison computed"}
+    baseline, event = frame.iloc[:baseline_days * 24], frame.iloc[baseline_days * 24:]
+    summaries = {}
+    for key in pollutants:
+        background, during = float(baseline[key].mean()), float(event[key].mean())
+        peak, peak_time = max(zip(event[key], event.index, strict=True))
+        summaries[key] = {"unit": "μg/m³", "baseline_mean": background, "event_mean": during,
+                          "event_max": float(peak), "peak_time_utc": peak_time, "mean_change": during - background,
+                          "event_to_baseline_ratio": during / background if background > 0 else None,
+                          "peak_vs_baseline": float(peak) / background if background > 0 else None}
+    return {
+        "ok": True, "source": "CAMS Europe modeled concentrations via Open-Meteo", "timezone": "UTC",
+        "latitude": latitude, "longitude": longitude, "grid_latitude": data.get("latitude"),
+        "grid_longitude": data.get("longitude"), "start_date": start_date, "end_date": end_date,
+        "baseline_start": before.isoformat(), "baseline_end": (start - timedelta(days=1)).isoformat(),
+        "baseline_hours": len(baseline), "event_hours": len(event), "pollutants": summaries,
+        "hourly": {"time": event.index.tolist(), **{k: event[k].tolist() for k in pollutants}},
+        "warnings": ["Modeled regional concentrations, not local measurements or estimated emissions.",
+                     "Differences from the preceding baseline do not establish fire-specific causation or health thresholds.",
+                     "CAMS Europe coverage and available historical periods are limited; no worldwide guarantee."],
+        "attribution": "CAMS / Open-Meteo (CC BY 4.0)",
+        "source_url": "https://open-meteo.com/en/docs/air-quality-api",
+    }
+
+
+@mcp.tool()
+async def get_community_air_quality(
+    place_name: str, latitude: float, longitude: float,
+    fire_latitude: float, fire_longitude: float, start_date: str, end_date: str | None = None,
+) -> str:
+    """CAMS Europe CO/PM2.5 mean comparison against seven preceding days.
+
+    Optional ERA5 wind alignment is coarse context, not plume transport or
+    evidence the fire caused pollution. Event dates are 1–31 past UTC days.
+    Incomplete concentrations are unavailable; unavailable wind does not erase AQ.
+    """
+    from pyproj import Geod
+
+    if not place_name.strip() or not (math.isfinite(fire_latitude) and math.isfinite(fire_longitude)
+                                     and -90 <= fire_latitude <= 90 and -180 <= fire_longitude <= 180):
+        return _tool_error("invalid_location", "Supply a community name and finite fire-centroid coordinates")
+    result = await _air_quality_data(latitude, longitude, start_date, end_date or start_date, 7,
+                                     ["pm2_5", "carbon_monoxide"])
+    if not result["ok"]:
+        return json.dumps(result)
+    result["place_name"] = place_name
+    weather = json.loads(await get_fire_weather(latitude, longitude, start_date, end_date, lookback_days=7))
+    bearing, _, distance = Geod(ellps="WGS84").inv(fire_longitude, fire_latitude, longitude, latitude)
+    wind = {"fire_centroid_distance_km": distance / 1000, "fire_to_community_bearing_deg": bearing % 360,
+            "aligned_fraction": None, "noncalm_valid_hours": 0, "event_hours": result["event_hours"],
+            "definition": "Wind TO within 45° of fire-to-community bearing, speed >=1 m/s; not evaluated within 1 km"}
+    if weather.get("ok"):
+        direction = np.asarray(weather["hourly"]["wind_direction_10m"], dtype=float)
+        speed = np.asarray(weather["hourly"]["wind_speed_10m"], dtype=float)
+        valid = np.isfinite(direction) & np.isfinite(speed) & (speed >= 1)
+        aligned = valid & (np.abs((direction + 180 - bearing + 180) % 360 - 180) <= 45)
+        usable = int(valid.sum())
+        wind.update(available=True, noncalm_valid_hours=usable,
+                    aligned_fraction=int(aligned.sum()) / usable if usable and distance >= 1000 else None)
+        result["warnings"].extend(weather["warnings"])
+    else:
+        wind["available"] = False
+        result["warnings"].append("ERA5 wind context unavailable; concentration comparison remains valid")
+    result["wind_context"] = wind
+    result["warnings"].append("Wind alignment is not transport simulation; place points do not represent every resident")
+    return json.dumps(result, allow_nan=False)
+
+
+@mcp.tool()
+async def get_smoke_signal(bbox: str, fire_date: str, days_after: int = 10, baseline_days: int = 14) -> str:
+    """Compatible bbox-centre CO/PM2.5/PM10 comparison, not fire-specific smoke proof.
+
+    Keeps the fourteen-day baseline and configurable 1–30 days after the event.
+    Both endpoints are inclusive. Baseline: 3–60 days. Historical CAMS Europe only;
+    actual returned event dates are clipped to past UTC days, never forecasts.
+    """
+    from datetime import UTC
+
+    try:
+        west, south, east, north = [float(v) for v in bbox.split(",")]
+        if not all(math.isfinite(v) for v in (west, south, east, north)) or not (
+            -180 <= west < east <= 180 and -90 <= south < north <= 90
+        ) or not 1 <= days_after <= 30 or not 3 <= baseline_days <= 60:
+            raise ValueError("Invalid bbox/window")
+        start = datetime.strptime(fire_date, "%Y-%m-%d").date()
+        if start.isoformat() != fire_date:
+            raise ValueError("Use ISO date")
+        requested_end = start + timedelta(days=days_after)
+        end = min(requested_end, datetime.now(UTC).date() - timedelta(days=1))
+    except (ValueError, TypeError, OverflowError):
+        return _tool_error("invalid_input", "Use finite bbox, ISO date and bounded event/baseline windows")
+    lat, lon = (south + north) / 2, (west + east) / 2
+    result = await _air_quality_data(lat, lon, fire_date, end.isoformat(), baseline_days,
+                                     ["carbon_monoxide", "pm2_5", "pm10"])
+    if not result["ok"]:
+        return json.dumps(result)
+    pollutants = {}
+    for key, value in result["pollutants"].items():
+        pollutants[key] = {"unit": "ug/m3", "baseline_mean": round(value["baseline_mean"], 1),
+                           "fire_period_mean": round(value["event_mean"], 1),
+                           "fire_period_peak": round(value["event_max"], 1), "peak_time_utc": value["peak_time_utc"],
+                           "peak_vs_baseline": round(value["peak_vs_baseline"], 1)
+                           if value["peak_vs_baseline"] is not None else None}
+    if requested_end != end:
+        result["warnings"].append("Requested event window clipped to past UTC days; not a complete requested-period comparison")
+    return json.dumps({**result, "pollutants": pollutants, "location": {"lat": round(lat, 4), "lon": round(lon, 4)},
+                       "fire_period": f"{fire_date} to {end}",
+                       "baseline_period": f"{result['baseline_start']} to {result['baseline_end']}",
+                       "note": "Model concentrations, not an emission measurement or proof that this fire caused smoke"},
+                      allow_nan=False)
+
+
+@mcp.tool()
+async def get_fire_exposure(
+    geojson_path: str | None = None, feature_index: int = 0, refresh: bool = False,
+    perimeter: dict | None = None, export: bool | None = None,
+) -> str:
+    """Current OSM mapped exposure, not damage/population or historical inventory.
+
+    Prefer one inline WGS84 GeoJSON Feature (256000 bytes / 10000 vertices).
+    Legacy file/index references must belong to DEFAULT_SAVE_DIR, are ephemeral,
+    and are not download URLs. Bbox: <6 degrees wide, <=2500 km², latitude -80..84.
+    Inline JSON needs no files; export=True enables optional local diagnostics.
+    Building ways only; relation-only/unmapped assets and enclosing ways may be absent.
+    """
+    from collections import Counter
+
+    from pyproj import Transformer
+    from shapely.geometry import LineString, Point, Polygon, box, mapping, shape
+    from shapely.ops import transform
+
+    path = None
+    try:
+        if (perimeter is None) == (geojson_path is None):
+            raise ValueError("Supply either perimeter or a server-local geojson_path")
+        if geojson_path is not None:
+            path = _artifact_path(geojson_path, existing=True)
+            if path.suffix.lower() != ".geojson" or path.stat().st_size > 25_000_000:
+                raise ValueError("Invalid or oversized GeoJSON file")
+            document = json.loads(path.read_text())
+            if document.get("type") != "FeatureCollection" or document.get("crs"):
+                raise ValueError("Supply a WGS84 FeatureCollection")
+            if isinstance(feature_index, bool) or not 0 <= feature_index < len(document["features"]):
+                raise ValueError("Invalid feature index")
+            perimeter = document["features"][feature_index]
+        feature = _bounded_perimeter(perimeter)
+        identity = _perimeter_provenance(feature)
+        geometry = shape(feature["geometry"])
+        west, south, east, north = geometry.bounds
+        zone = min(60, int(((west + east) / 2 + 180) / 6) + 1)
+        epsg = (32600 if south + north >= 0 else 32700) + zone
+        project = Transformer.from_crs(4326, epsg, always_xy=True).transform
+        unproject = Transformer.from_crs(epsg, 4326, always_xy=True).transform
+        burn = transform(project, geometry)
+        if transform(project, box(west, south, east, north)).area > 2_500_000_000:
+            return _tool_error("area_too_large", "Perimeter bbox must be at most 2500 km²")
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError):
+        return _tool_error("invalid_perimeter", "Supply a bounded WGS84 Feature or confined valid file/index")
+
+    query = (f'[out:json][timeout:60];(way["building"]({south},{west},{north},{east});'
+             f'way["highway"]({south},{west},{north},{east});'
+             f'node["place"]["name"]({south},{west},{north},{east}););out geom;')
+    export = bool(path) if export is None else export
+    prefix = path.with_name(f"{path.stem}_feature_{feature_index}_exposure") if path else (
+        DEFAULT_SAVE_DIR / ("exposure_" + identity["fingerprint"][:16]))
+    warnings, cached, data = [], False, None
+    if path and not refresh:
+        try:
+            snapshot = _artifact_path(str(prefix.with_suffix(".osm.json")), existing=True)
+            saved = json.loads(snapshot.read_text()) if snapshot.stat().st_size <= 25_000_000 else {}
+            if saved.get("query") == query:
+                data, cached = saved["data"], True
+        except (OSError, ValueError, KeyError):
+            pass
+    try:
+        if data is None:
+            response = await _http_get("https://overpass-api.de/api/interpreter", params={"data": query})
+            if len(response.content) > 25_000_000:
+                raise ValueError("Oversized Overpass response")
+            data = response.json()
+        if data.get("remark") or not isinstance(data.get("elements"), list):
+            raise ValueError("Incomplete Overpass response")
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        return _tool_error("overpass_unavailable", "No exposure counts computed: OSM data unavailable/incomplete")
+
+    assets, places, roads, buildings, skipped = [], [], Counter(), 0, 0
+    for element in data["elements"]:
+        try:
+            tags = element.get("tags", {})
+            if element["type"] == "node":
+                if tags.get("place") not in {"city", "town", "village", "hamlet", "suburb"} or not tags.get("name"):
+                    continue
+                geom, kind = Point(element["lon"], element["lat"]), "place"
+            else:
+                coords = [(p["lon"], p["lat"]) for p in element["geometry"]]
+                if "building" in tags and tags["building"] != "no":
+                    if len(coords) < 4 or coords[0] != coords[-1]:
+                        raise ValueError("Incomplete building way")
+                    geom, kind = Polygon(coords), "building"
+                elif "highway" in tags:
+                    geom, kind = LineString(coords), "road"
+                else:
+                    continue
+            if geom.is_empty or not geom.is_valid:
+                raise ValueError("Invalid OSM geometry")
+            clipped = transform(project, geom).intersection(burn)
+            if clipped.is_empty:
+                continue
+            if kind == "building" and clipped.area > 0:
+                buildings += 1
+            elif kind == "road" and clipped.length > 0:
+                roads[tags["highway"]] += clipped.length
+            elif kind == "place":
+                places.append({"name": tags["name"], "place": tags["place"], "osm_id": element["id"]})
+            else:
+                continue
+            assets.append({"type": "Feature", "geometry": mapping(transform(unproject, clipped)),
+                           "properties": {"kind": kind, "osm_id": element["id"], "name": tags.get("name", ""),
+                                          "highway": tags.get("highway")}})
+        except (KeyError, TypeError, ValueError):
+            skipped += 1
+
+    artifacts = {}
+    if export:
+        try:
+            import matplotlib.pyplot as plt
+
+            prefix = _artifact_path(str(prefix))
+            prefix.parent.mkdir(parents=True, exist_ok=True)
+            for suffix, content in [(".geojson", {"type": "FeatureCollection", "features": assets}),
+                                    (".osm.json", {"query": query, "data": data})]:
+                target = _artifact_path(str(prefix.with_suffix(suffix)))
+                target.write_text(json.dumps(content))
+            fig, ax = plt.subplots(figsize=(9, 7))
+
+            def draw(geom, color):
+                if hasattr(geom, "geoms"):
+                    for part in geom.geoms:
+                        draw(part, color)
+                elif geom.geom_type == "Polygon":
+                    draw(geom.boundary, color)
+                elif geom.geom_type == "Point":
+                    ax.plot(geom.x, geom.y, ".", color=color)
+                else:
+                    ax.plot(*geom.xy, color=color, linewidth=0.7)
+
+            draw(burn, "firebrick")
+            for asset in assets:
+                draw(transform(project, shape(asset["geometry"])),
+                     {"building": "darkorange", "road": "steelblue", "place": "black"}[asset["properties"]["kind"]])
+            ax.set(aspect="equal", title="Mapped OSM exposure, not damage", xlabel="Easting (m)", ylabel="Northing (m)")
+            fig.text(0.01, 0.01, "© OpenStreetMap contributors (ODbL); supplied perimeter", fontsize=7)
+            image = _artifact_path(str(prefix.with_suffix(".png")))
+            try:
+                fig.savefig(image, dpi=130, bbox_inches="tight")
+            finally:
+                plt.close(fig)
+            artifacts = {"map_path": str(image), "geojson_path": str(prefix.with_suffix(".geojson")),
+                         "artifact_scope": "server-local only; not a URL or persistence guarantee"}
+        except (OSError, ValueError):
+            warnings.append("Local diagnostic export unavailable; JSON statistics remain valid")
+    centroid = transform(unproject, burn.centroid)
+    return json.dumps({
+        "ok": True, "source": "OpenStreetMap / Overpass", "feature_index": feature_index,
+        "fire_date": feature.get("properties", {}).get("FIREDATE"),
+        "perimeter_source": "caller-supplied GeoJSON; provenance not independently authenticated",
+        "perimeter_provenance": identity,
+        "centroid": {"latitude": centroid.y, "longitude": centroid.x},
+        "building_way_count": buildings, "road_km": sum(roads.values()) / 1000,
+        "road_km_by_class": {k: v / 1000 for k, v in sorted(roads.items())},
+        "named_place_point_count": len(places), "places": sorted(places, key=lambda p: p["name"]),
+        "skipped_geometries": skipped, "osm_timestamp": data.get("osm3s", {}).get("timestamp_osm_base"),
+        "cached_osm": cached, **artifacts,
+        "warnings": warnings + ["Current mapped overlap is not damage or historical asset completeness.",
+                                "Building ways only; relation-only/unmapped/enclosing ways may be missing.",
+                                "Place points are labels, not population or settlement footprints.",
+                                f"Skipped {skipped} invalid/incomplete geometries."],
+        "attribution": "© OpenStreetMap contributors, ODbL: https://www.openstreetmap.org/copyright",
+    }, allow_nan=False)
+
 
 if __name__ == "__main__":
     import argparse
