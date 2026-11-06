@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant LLM
+    participant Host as Host application
+    participant A as Instance A
+    participant B as Instance B
+    participant Store as Shared store
+
+    LLM->>Host: start_burn_analysis(bbox, fire_date)
+    Host->>A: tools/call
+    A->>Store: Save the job under ana_7f3c
+    A-->>Host: analysis_id ana_7f3c, status queued
+    Host->>LLM: Observation with the handle
+
+    Note over Host,B: The next call can land on another instance.
+    LLM->>Host: get_burn_analysis(analysis_id="ana_7f3c")
+    Host->>B: tools/call
+    B->>Store: Load ana_7f3c
+    Store-->>B: Status done, dNBR statistics
+    B-->>Host: Result
+    Host->>LLM: Observation

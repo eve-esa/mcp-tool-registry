@@ -1,0 +1,56 @@
+W,H=1000,740
+o=[]
+a=o.append
+a(f'<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 {W} {H}" style="max-width:{W}px;background:#fff" font-family="Helvetica, Arial, sans-serif" font-size="16" role="img" aria-label="Stdio: host and server on one machine. Streamable HTTP: host on one machine, server on another machine.">')
+a('<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker></defs>')
+def rect(x,y,w,h,fill,stroke,dash=False,rx=12):
+    a(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}" fill="{fill}" stroke="{stroke}" stroke-width="2"'+(' stroke-dasharray="8 5"' if dash else '')+'/>')
+def text(x,y,t,size=16,weight="normal",anchor="middle",fill="#222"):
+    lines=t.split("\n")
+    for i,l in enumerate(lines):
+        a(f'<text x="{x}" y="{y+i*(size+4)}" text-anchor="{anchor}" font-size="{size}" font-weight="{weight}" fill="{fill}">{l}</text>')
+def arrow(x1,y1,x2,y2,both=False):
+    a(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#333" stroke-width="2" marker-end="url(#ar)"'+(' marker-start="url(#ar)"' if both else '')+'/>')
+# Local
+def filebox(x,y,w,label,sub,fill="#fffbe0",stroke="#c9a400"):
+    rect(x,y,w,64,fill,stroke,rx=8)
+    text(x+w/2,y+28,label,15,"bold")
+    text(x+w/2,y+48,sub,13,fill="#555")
+rect(20,20,960,300,"#eef5ff","#5b8def")
+text(40,52,"Local: stdio. One machine.",18,"bold","start")
+rect(50,90,250,110,"#fff","#333")
+text(175,140,"Host application",17,"bold")
+text(175,164,"on the user's computer",14,fill="#555")
+rect(650,90,270,110,"#fff","#333")
+text(785,132,"Server process",17,"bold")
+text(785,156,"started by the host,\nsame computer",14,fill="#555")
+arrow(300,115,650,115); text(475,108,"starts the process",14)
+arrow(300,145,650,145); text(475,138,"requests on stdin",14)
+arrow(650,178,300,178); text(475,171,"responses on stdout",14)
+filebox(650,226,270,"Files the tool creates","on the user's computer")
+a('<line x1="785" y1="200" x2="785" y2="226" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>')
+text(50,252,"No network. Nobody else can reach this server.\nThe host and the user can open the files directly.",14,anchor="start",fill="#444")
+# Remote
+rect(20,350,960,370,"#fff7ec","#e8913a")
+text(40,382,"Remote: Streamable HTTP over HTTPS. Two machines.",18,"bold","start")
+rect(50,410,300,280,"#fff","#333",dash=True)
+text(200,438,"Machine A",16,"bold")
+text(200,460,"the user's computer",14,fill="#555")
+rect(100,480,200,90,"#fff","#333")
+text(200,520,"Host application",16,"bold")
+text(200,606,"Files are not stored here,\nbut the host can still read them\nby asking the server.",14,fill="#444")
+rect(650,410,300,280,"#fff","#333",dash=True)
+text(800,438,"Machine B",16,"bold")
+text(800,460,"a remote server, running on its own",14,fill="#555")
+rect(700,480,200,90,"#fff","#333")
+text(800,518,"Server",16,"bold")
+text(800,540,"HTTPS endpoint",14,fill="#555")
+filebox(700,606,200,"Files the tool creates","stay on the server")
+a('<line x1="800" y1="570" x2="800" y2="606" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>')
+arrow(350,520,650,520); text(500,510,"HTTPS POST, encrypted in transit",14)
+arrow(650,570,350,570); text(500,595,"response over HTTPS, optionally streamed",14)
+a('<line x1="350" y1="646" x2="698" y2="646" stroke="#c9a400" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#ar)"/>')
+text(524,636,"host reads the file",14)
+text(524,672,"through the server (resources/read)",14)
+a('</svg>')
+open('../images/transports.svg','w').write("\n".join(o))

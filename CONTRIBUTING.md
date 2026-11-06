@@ -2,6 +2,8 @@
 
 This repository is a monorepo of [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) servers. Each subdirectory under `servers/` is an independent server that gets packaged into a Docker container and deployed to **AWS Bedrock AgentCore**.
 
+For the protocol itself (tools, resources, prompts, and the loop an agent uses when it calls your server), read the [MCP Handbook](docs/mcp-handbook.ipynb).
+
 ---
 
 ## Table of Contents
@@ -34,6 +36,10 @@ servers/
     effis/              # Example: Fire Detection server
     eve_retrieval/      # Example: EVE Retrieval server
     your-server/        # <-- Your new server goes here
+docs/
+    mcp-handbook.ipynb  # Protocol background and the agent loop
+    diagrams/           # Mermaid source for the handbook figures
+    images/             # Figures for the handbook
 ruff.toml               # Linter configuration
 CODEOWNERS              # Protects shared infrastructure paths
 ```

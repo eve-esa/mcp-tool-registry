@@ -1,0 +1,10 @@
+flowchart LR
+    dev["servers/your-server/<br/>server.py, requirements.txt,<br/>CITATION.cff"] --> pr["Pull request<br/>against main"]
+    pr --> checks{"PR checks<br/>pr-checks.yml"}
+    checks -- fail --> dev
+    checks -- pass --> review{"Code review<br/>a person"}
+    review -- reject --> pr
+    review -- pass --> merge["Merge to main"]
+    merge --> run["Server runs<br/>deployed and running"]
+    run --> staging["Staging test<br/>a person"]
+    staging --> public["Public in EVE<br/>tools/list shows it"]
