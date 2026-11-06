@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import httpx
 from mcp import ClientSession, StdioServerParameters
@@ -30,6 +31,16 @@ FEATURE = {
 
 def provider(request):
     case = os.getenv("EFFIS_CONTRACT_CASE", "normal")
+    if request.url.host == "identity.dataspace.copernicus.eu":
+        form = parse_qs(request.content.decode())
+        pair = (form.get("client_id", [None])[0], form.get("client_secret", [None])[0])
+        expected = ("hdr-id", "hdr") if case == "credentials-header" else ("env-id", "env")
+        return httpx.Response(200, json={"access_token": "fixture"}) if pair == expected else httpx.Response(401)
+    if request.url.host == "sh.dataspace.copernicus.eu":
+        return httpx.Response(200, json={"features": []}) if request.url.path.endswith("/search") else httpx.Response(422)
+    if request.url.host == "nominatim.openstreetmap.org":
+        return httpx.Response(200, json=[{"display_name": "Fixture", "lat": "38.8", "lon": "23.3",
+                                        "boundingbox": ["38.7", "38.9", "23.2", "23.4"], "importance": 0.9}])
     if "effis" in request.url.host:
         if case == "lookup-error":
             return httpx.Response(503)
@@ -146,12 +157,14 @@ def serve(transport, port):
 
 
 @asynccontextmanager
-async def session(transport="stdio", case="normal"):
+async def session(transport="stdio", case="normal", headers=None):
     with tempfile.TemporaryDirectory() as base:
         directory = Path(base) / "artifacts"
         directory.mkdir()
         env = dict(os.environ, CDSE_CLIENT_ID="", CDSE_CLIENT_SECRET="", EFFIS_SHAPEFILE_DIR="",
                    DEFAULT_SAVE_DIR=str(directory), MPLCONFIGDIR=str(Path(base) / "mpl"), EFFIS_CONTRACT_CASE=case)
+        if case.startswith("credentials-"):
+            env.update(CDSE_CLIENT_ID="env-id", CDSE_CLIENT_SECRET="env")
         command = [str(Path(__file__).resolve()), "--serve", "--transport", transport]
         if transport == "stdio":
             params = StdioServerParameters(command=sys.executable, args=command, env=env)
@@ -177,7 +190,7 @@ async def session(transport="stdio", case="normal"):
                             await asyncio.sleep(0.05)
                     else:
                         raise AssertionError("Fixture HTTP server startup timed out")
-                    async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _):
+                    async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp", headers=headers) as (read, write, _):
                         async with ClientSession(read, write) as client:
                             await client.initialize()
                             yield client, directory
@@ -199,7 +212,11 @@ async def call(client, name, **arguments):
 async def checks(transport):
     async with session(transport) as (client, directory):
         names = {tool.name for tool in (await client.list_tools()).tools}
-        assert {"geocode_place", "get_effis_burnt_areas", "compute_metrics"} <= names
+        assert names == {"geocode_place", "get_effis_burnt_areas", "compute_metrics", "get_fire_exposure",
+                         "get_fire_weather", "get_community_air_quality", "get_smoke_signal",
+                         "get_burn_fuel_types", "estimate_fire_emissions", "detect_burned_area"}
+        geocoded = await call(client, "geocode_place", place_name="Fixture", buffer_km=0)
+        assert geocoded["top_result"]["bbox"] == "23.2000,38.7000,23.4000,38.9000", geocoded
         found = await call(client, "get_effis_burnt_areas", bbox="-1,-1,1,1", date="2021-08-03",
                            max_features=1, buffer_km=0, include_perimeter=True)
         assert "fires" in found, found
@@ -387,7 +404,19 @@ async def checks(transport):
                 assert "burned_area_ha" not in monthly
                 if case == "stats-rejected":
                     assert monthly["provider_http_status"] == 400 and fuel["provider_http_status"] == 400
-    print(f"PASS {transport}: all context/screening tools, arithmetic, provenance, data failures, security and false-green guards")
+    async with session(transport, "credentials-env") as (client, _):
+        authenticated = await call(client, "compute_metrics", bbox="0,0,.01,.01", fire_date="2021-08-03",
+                                   months_before=1, months_after=1, metrics=["ndvi"], resolution_m=0, width=2, height=2)
+        assert authenticated.get("error_type") == "burn_mask_unavailable", authenticated
+    if transport == "http":
+        for case, secret, expected in [("credentials-header", "hdr", "burn_mask_unavailable"),
+                                        ("credentials-bad", "bad", "cdse_auth")]:
+            headers = {"X-CDSE-Client-Id": "hdr-id", "X-CDSE-Client-Secret": secret}
+            async with session(transport, case, headers) as (client, _):
+                result = await call(client, "compute_metrics", bbox="0,0,.01,.01", fire_date="2021-08-03",
+                                    months_before=1, months_after=1, metrics=["ndvi"], resolution_m=0, width=2, height=2)
+                assert result.get("error_type") == expected, result
+    print(f"PASS {transport}: all context/screening tools, arithmetic, provenance, data failures, security, credentials and false-green guards")
 
 
 async def main():

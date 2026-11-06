@@ -113,11 +113,29 @@ Gross CO2/CO2e release is not net climate impact, an inventory total, a carbon
 offset or guaranteed regrowth. Car-years are illustrative tailpipe-CO2 comparisons,
 not life-cycle equivalence. No causal smoke, damage or population inference follows.
 
+## Attribution and readiness limits
+
+Existing Antonio Lopez credit is retained. Additional verified contributors are
+Alessandro D'Angelo (`a-dangelo`) and Sameer Ahmed (`Sameer-Ahmed7`), both with
+Apache-2.0 consent. Added metadata entries are alphabetically serialized for
+identification only; citation priority and fine-grained roles have not been
+agreed and are not inferred from notebook names or commit counts. No ORCID or
+additional affiliation is invented. The human review before publication must
+resolve any required final citation-order preference.
+
+Local checks and a shared Linux image build are not AgentCore certification or
+permission to publish. EVE deployment operators remain responsible for service
+plan/commercial eligibility and credentials; upstream maintainers determine
+acceptance of expanded remit, request limits and hosted behavior. No such
+acceptance or free-API entitlement is asserted by the local contribution.
+
 <!-- BEGIN GENERATED CITATION: edit CITATION.cff, then run `python scripts/citation.py servers/<name>` -->
 
 ## Authors
 
 - **Antonio Lopez**, [@Lopez-Antonio](https://github.com/Lopez-Antonio), Pi School
+- **Alessandro D'Angelo**, [@a-dangelo](https://github.com/a-dangelo)
+- **Sameer Ahmed**, [@Sameer-Ahmed7](https://github.com/Sameer-Ahmed7)
 
 ## Citation
 
