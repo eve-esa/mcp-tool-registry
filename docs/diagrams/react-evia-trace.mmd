@@ -1,0 +1,30 @@
+sequenceDiagram
+    actor User
+    participant LLM
+    participant Host as EVE host
+    participant G as geocode
+    participant E as effis
+    participant S as serpapi
+
+    User->>Host: Wildfire briefing for Evia, August 2021
+    Host->>LLM: Question and tool list
+
+    Note over LLM: Reason. EFFIS needs a bbox. Geocode first.
+    LLM->>Host: geocode_place(place_name="Evia island")
+    Host->>G: tools/call
+    G-->>Host: bbox 22.8285,37.9489,24.5933,39.0396
+    Host->>LLM: Observation
+
+    Note over LLM: Reason. Pass that bbox to EFFIS.
+    LLM->>Host: get_effis_burnt_areas(bbox, date="2021-08")
+    Host->>E: tools/call
+    E-->>Host: Fires with area_ha, commune, firedate
+    Host->>LLM: Observation
+
+    Note over LLM: Reason. The news part needs a search.
+    LLM->>Host: search_google(query="Evia wildfire August 2021")
+    Host->>S: tools/call
+    S-->>Host: Titles, URLs, snippets
+    Host->>LLM: Observation
+
+    LLM-->>User: Briefing. Each fact names its tool.

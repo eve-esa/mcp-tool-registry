@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1000 740" style="max-width:1000px;background:#fff" font-family="Helvetica, Arial, sans-serif" font-size="16" role="img" aria-label="Stdio: host and server on one machine. Streamable HTTP: host on one machine, server on another machine.">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker></defs>
+<rect x="20" y="20" width="960" height="300" rx="12" fill="#eef5ff" stroke="#5b8def" stroke-width="2"/>
+<text x="40" y="52" text-anchor="start" font-size="18" font-weight="bold" fill="#222">Local: stdio. One machine.</text>
+<rect x="50" y="90" width="250" height="110" rx="12" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="175" y="140" text-anchor="middle" font-size="17" font-weight="bold" fill="#222">Host application</text>
+<text x="175" y="164" text-anchor="middle" font-size="14" font-weight="normal" fill="#555">on the user's computer</text>
+<rect x="650" y="90" width="270" height="110" rx="12" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="785" y="132" text-anchor="middle" font-size="17" font-weight="bold" fill="#222">Server process</text>
+<text x="785" y="156" text-anchor="middle" font-size="14" font-weight="normal" fill="#555">started by the host,</text>
+<text x="785" y="174" text-anchor="middle" font-size="14" font-weight="normal" fill="#555">same computer</text>
+<line x1="300" y1="115" x2="650" y2="115" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>
+<text x="475" y="108" text-anchor="middle" font-size="14" font-weight="normal" fill="#222">starts the process</text>
+<line x1="300" y1="145" x2="650" y2="145" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>
+<text x="475" y="138" text-anchor="middle" font-size="14" font-weight="normal" fill="#222">requests on stdin</text>
+<line x1="650" y1="178" x2="300" y2="178" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>
+<text x="475" y="171" text-anchor="middle" font-size="14" font-weight="normal" fill="#222">responses on stdout</text>
+<rect x="650" y="226" width="270" height="64" rx="8" fill="#fffbe0" stroke="#c9a400" stroke-width="2"/>
+<text x="785.0" y="254" text-anchor="middle" font-size="15" font-weight="bold" fill="#222">Files the tool creates</text>
+<text x="785.0" y="274" text-anchor="middle" font-size="13" font-weight="normal" fill="#555">on the user's computer</text>
+<line x1="785" y1="200" x2="785" y2="226" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>
+<text x="50" y="252" text-anchor="start" font-size="14" font-weight="normal" fill="#444">No network. Nobody else can reach this server.</text>
+<text x="50" y="270" text-anchor="start" font-size="14" font-weight="normal" fill="#444">The host and the user can open the files directly.</text>
+<rect x="20" y="350" width="960" height="370" rx="12" fill="#fff7ec" stroke="#e8913a" stroke-width="2"/>
+<text x="40" y="382" text-anchor="start" font-size="18" font-weight="bold" fill="#222">Remote: Streamable HTTP over HTTPS. Two machines.</text>
+<rect x="50" y="410" width="300" height="280" rx="12" fill="#fff" stroke="#333" stroke-width="2" stroke-dasharray="8 5"/>
+<text x="200" y="438" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">Machine A</text>
+<text x="200" y="460" text-anchor="middle" font-size="14" font-weight="normal" fill="#555">the user's computer</text>
+<rect x="100" y="480" width="200" height="90" rx="12" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="200" y="520" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">Host application</text>
+<text x="200" y="606" text-anchor="middle" font-size="14" font-weight="normal" fill="#444">Files are not stored here,</text>
+<text x="200" y="624" text-anchor="middle" font-size="14" font-weight="normal" fill="#444">but the host can still read them</text>
+<text x="200" y="642" text-anchor="middle" font-size="14" font-weight="normal" fill="#444">by asking the server.</text>
+<rect x="650" y="410" width="300" height="280" rx="12" fill="#fff" stroke="#333" stroke-width="2" stroke-dasharray="8 5"/>
+<text x="800" y="438" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">Machine B</text>
+<text x="800" y="460" text-anchor="middle" font-size="14" font-weight="normal" fill="#555">a remote server, running on its own</text>
+<rect x="700" y="480" width="200" height="90" rx="12" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="800" y="518" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">Server</text>
+<text x="800" y="540" text-anchor="middle" font-size="14" font-weight="normal" fill="#555">HTTPS endpoint</text>
+<rect x="700" y="606" width="200" height="64" rx="8" fill="#fffbe0" stroke="#c9a400" stroke-width="2"/>
+<text x="800.0" y="634" text-anchor="middle" font-size="15" font-weight="bold" fill="#222">Files the tool creates</text>
+<text x="800.0" y="654" text-anchor="middle" font-size="13" font-weight="normal" fill="#555">stay on the server</text>
+<line x1="800" y1="570" x2="800" y2="606" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>
+<line x1="350" y1="520" x2="650" y2="520" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>
+<text x="500" y="510" text-anchor="middle" font-size="14" font-weight="normal" fill="#222">HTTPS POST, encrypted in transit</text>
+<line x1="650" y1="570" x2="350" y2="570" stroke="#333" stroke-width="2" marker-end="url(#ar)"/>
+<text x="500" y="595" text-anchor="middle" font-size="14" font-weight="normal" fill="#222">response over HTTPS, optionally streamed</text>
+<line x1="350" y1="646" x2="698" y2="646" stroke="#c9a400" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#ar)"/>
+<text x="524" y="636" text-anchor="middle" font-size="14" font-weight="normal" fill="#222">host reads the file</text>
+<text x="524" y="672" text-anchor="middle" font-size="14" font-weight="normal" fill="#222">through the server (resources/read)</text>
+</svg>

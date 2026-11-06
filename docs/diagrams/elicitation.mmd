@@ -1,0 +1,18 @@
+sequenceDiagram
+    actor User
+    participant Client
+    participant Server
+
+    Client->>Server: tools/call (id: 1)
+    Note over Server: Server needs more information
+    Server-->>Client: InputRequiredResult with elicitation/create request
+
+    Note over Client,User: Human interaction
+    Client->>User: Present elicitation UI
+    User-->>Client: Provide requested information
+
+    Note over Client,Server: Retry request with user input
+    Client->>Server: tools/call (id: 2, inputResponses)
+
+    Note over Server: Continue processing with new information
+    Server-->>Client: Final result

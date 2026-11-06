@@ -1,0 +1,10 @@
+flowchart TD
+    request["tools/call lookup_aoi<br/>place = 'Atlantis'"] --> wellformed{"Known tool and<br/>well-formed request?"}
+    wellformed -- no --> proto["Protocol error<br/>JSON-RPC error -32602"]
+    proto --> hostfix["The host handles it.<br/>The model can rarely fix it."]
+    wellformed -- yes --> run["Run the tool"]
+    run --> usable{"Valid arguments and<br/>a usable answer?"}
+    usable -- no --> exec["Tool execution error<br/>isError: true<br/>'Unknown area Atlantis. Known areas: attica, evia.'"]
+    exec --> retry["The model reads the text<br/>and retries with new arguments"]
+    retry --> request
+    usable -- yes --> result["Result<br/>content + structuredContent"]

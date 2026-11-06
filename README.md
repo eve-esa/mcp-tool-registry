@@ -89,6 +89,7 @@ New EO tools are welcome. In short:
 
 CI checks the folder structure, the entrypoint contract, pinned versions, a valid `CITATION.cff`, secrets and file sizes, then runs `ruff` and a Docker build.
 The full guide, with a server template and the PR checklist, is in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+For what MCP is, and how an agent calls a tool, see the [MCP Handbook](docs/mcp-handbook.ipynb).
 
 ## Deployment and early access
 
