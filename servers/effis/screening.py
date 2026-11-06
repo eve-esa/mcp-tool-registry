@@ -342,15 +342,18 @@ async def estimate_fire_emissions(
         if set(weights) - FUELS - NON_FUEL:
             raise ValueError("Unknown fuel classes")
         shares = {k: v for k, v in weights.items() if k not in NON_FUEL and v > 0}
-        total = _number(sum(shares.values()), positive=True)
+        scale = _number(max(shares.values(), default=0), positive=True)
+        scaled = {key: value / scale for key, value in shares.items()}
+        total = math.fsum(scaled.values())
+        fractions = {key: value / total for key, value in scaled.items()}
     except (ValueError, TypeError, OverflowError):
         return _error("Use finite nonnegative shares with at least one supported burnable fuel", allowed=sorted(FUELS))
     latitude = (box[1] + box[3]) / 2
     biome = "tropical" if abs(latitude) < 23.5 else ("boreal" if abs(latitude) > 50 else "temperate")
     tonnes = {k: [0.0, 0.0, 0.0] for k in EF["tropical_forest"]}
     by_fuel = {}
-    for fuel, weight in shares.items():
-        assigned_area = area * (weight / total)
+    for fuel in shares:
+        assigned_area = area * fractions[fuel]
         key = f"tree_cover:{biome}" if fuel == "tree_cover" else fuel
         low, central, high, row = FUEL[key]
         category = "savanna_grassland"
@@ -375,7 +378,7 @@ async def estimate_fire_emissions(
         "area_provenance": "caller supplied; no independent EFFIS/event authentication", "fuel_source": fuel_source,
         "fuel_provenance": fuel_provenance,
         "biome": biome, "biome_method": "absolute-latitude heuristic (<23.5 tropical, >50 boreal), not mapped ecozone",
-        "fuel_shares_pct_used": {k: 100 * v / total for k, v in shares.items()},
+        "fuel_shares_pct_used": {k: 100 * fraction for k, fraction in fractions.items()},
         "excluded_non_fuel_classes": sorted(set(weights) & NON_FUEL),
         "emissions_tonnes": {g: _range(v) for g, v in tonnes.items()}, "co2_equivalent_tonnes": _range(co2e),
         "car_years_equivalent": _range([v / 4.6 for v in tonnes["CO2"]]), "by_fuel_type": by_fuel,

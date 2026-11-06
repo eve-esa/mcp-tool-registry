@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -410,7 +411,6 @@ async def checks(transport):
                           {"fuel_shares_pct": {}}, {"fuel_shares_pct": {"grassland": -1}},
                           {"fuel_shares_pct": {"grassland": "inf"}}, {"fuel_shares_pct": {"unknown": 100}},
                           {"fuel_shares_pct": {"water": 100}}, {"fuel_shares_pct": {"grassland": 0}},
-                          {"fuel_shares_pct": {"grassland": 1e308, "cropland": 1e308}},
                           {"fire_date": "2021-02-30"}]:
             invalid = await call(client, "estimate_fire_emissions", **({"burned_area_ha": 10,
                                  "bbox": "23.2,38.7,23.4,38.9", "fuel_shares_pct": {"grassland": 100}} | overrides))
@@ -622,10 +622,37 @@ async def review_provenance(transport):
     print(f"PASS {transport}: bounded composed WorldCover temporal/citation provenance and unauthenticated perimeter fingerprint")
 
 
+async def review_shares(transport):
+    def finite(value):
+        if isinstance(value, float):
+            assert math.isfinite(value), "Strict JSON numeric output must remain finite"
+        elif isinstance(value, dict):
+            for child in value.values():
+                finite(child)
+        elif isinstance(value, list):
+            for child in value:
+                finite(child)
+
+    async with session(transport) as (client, _):
+        cases = [({"grassland": 1e308}, 66.1, 71.0),
+                 ({"grassland": 1e308, "cropland": 1e308}, 74.7, 79.7),
+                 ({"grassland": 1e308, "cropland": 1e307}, 67.7, 72.6),
+                 ({"grassland": 1e-308, "cropland": 1e-308}, 74.7, 79.7)]
+        for shares, co2, co2e in cases:
+            result = await call(client, "estimate_fire_emissions", burned_area_ha=10,
+                                bbox="23.2,38.7,23.4,38.9", fuel_shares_pct=shares)
+            assert result["ok"], result
+            assert result["emissions_tonnes"]["CO2"]["central"] == co2
+            assert result["co2_equivalent_tonnes"]["central"] == co2e
+            assert abs(sum(result["fuel_shares_pct_used"].values()) - 100) < 1e-12
+            finite(result)
+    print(f"PASS {transport}: extreme finite shares normalize without overflow and retain independent references")
+
+
 async def main():
     failures = []
     review_checks = {"review-metrics": review_metrics, "review-wfs": review_wfs, "review-modis": review_modis,
-                     "review-provenance": review_provenance}
+                     "review-provenance": review_provenance, "review-shares": review_shares}
     for transport in ("stdio", "http"):
         try:
             if args.only:
@@ -653,7 +680,7 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--only", choices=["review-metrics", "review-wfs", "review-modis", "review-provenance"])
+    parser.add_argument("--only", choices=["review-metrics", "review-wfs", "review-modis", "review-provenance", "review-shares"])
     args = parser.parse_args()
     if args.serve:
         serve(args.transport, args.port)

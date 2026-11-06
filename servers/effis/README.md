@@ -94,7 +94,10 @@ bypass, new credentials or individual perimeter is introduced.
 or the WorldCover proxy. Area is not authenticated as an EFFIS event. All numeric
 inputs must be finite/nonnegative (area positive); area may not exceed spherical
 bbox area by more than the documented 5% envelope tolerance. Unsupported/empty
-burnable shares are unavailable, not zero emissions. The retained gas, CO2e,
+burnable shares are unavailable, not zero emissions. Finite relative weights are
+scaled before summing and before percentage output, so even extreme finite
+shares do not overflow strict JSON; absolute weight scale does not change the
+estimate. The retained gas, CO2e,
 car-year and by-fuel outputs carry units and explicit assumptions. Automatic
 screening also retains bounded WorldCover version/year/tile IDs, DOI/attribution,
 map choice and pre-fire relationship in `fuel_provenance` and its source list.
