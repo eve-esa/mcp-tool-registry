@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: GDACS Disasters MCP Server
+abstract: >-
+  MCP server for global natural disaster and hazard monitoring via GDACS
+  (Global Disaster Alert and Coordination System), a joint initiative of the
+  UN and European Commission. It searches ongoing and recent events worldwide,
+  covering earthquakes, floods, volcanoes, wildfires, droughts, cyclones, and
+  tsunamis.
+authors:
+  - given-names: Edward
+    family-names: Jeffrey
+    email: edward.jeffrey@imperativespace.com
+keywords:
+  - mcp
+  - gdacs
+  - disasters
+  - natural-hazards
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/gdacs
