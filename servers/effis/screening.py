@@ -205,13 +205,40 @@ async def get_burn_fuel_types(bbox: str, fire_date: str | None = None) -> str:
     }, allow_nan=False)
 
 
+async def _mapping_coverage(client, item, piece, first, last):
+    """Screen supported QA/interval assets; independent sampled histograms, not a pixelwise uncertainty model."""
+    qa_counts, qa_values, _ = await _histogram(client, "modis-64A1-061", item, "QA", piece)
+    first_counts, first_values, _ = await _histogram(client, "modis-64A1-061", item, "First_Day", piece)
+    last_counts, last_values, _ = await _histogram(client, "modis-64A1-061", item, "Last_Day", piece)
+    first_values = [value for count, value in zip(first_counts, first_values, strict=True) if count > 0]
+    last_values = [value for count, value in zip(last_counts, last_values, strict=True) if count > 0]
+    year_days = first.replace(month=12, day=31).timetuple().tm_yday
+    if any(not 1 <= value <= year_days for value in first_values + last_values):
+        raise ValueError("Unsupported reliable mapping interval")
+    shortened = sum(count for count, value in zip(qa_counts, qa_values, strict=True) if value & 4)
+    invalid = sum(count for count, value in zip(qa_counts, qa_values, strict=True)
+                  if value > 255 or value & 3 != 3)
+    first_max, last_min = max(first_values), min(last_values)
+    covered = (not shortened and not invalid and first_max <= first.timetuple().tm_yday
+               and last_min >= last.timetuple().tm_yday)
+    return {"tile_id": item["id"], "status": "sampled_month_covered" if covered else "incomplete",
+            "shortened_sample_count": shortened, "invalid_or_nonland_sample_count": invalid,
+            "max_reliable_first_day": first_max, "min_reliable_last_day": last_min,
+            "requested_first_day": first.timetuple().tm_yday, "requested_last_day": last.timetuple().tm_yday,
+            "assets": ["QA", "First_Day", "Last_Day"],
+            "source_url": "https://lpdaac.usgs.gov/documents/1006/MCD64_User_Guide_V61.pdf",
+            "basis": "MCD64A1 v6.1 User Guide §3.1.2; categorical sampled statistics, not full-resolution QA certainty"}
+
+
 async def detect_burned_area(bbox: str, month: str) -> str:
     """Approximate monthly MCD64A1 bbox aggregate, NOT an individual perimeter.
 
     Useful as an explicitly labelled fallback. Multiple recorded fires/pixels
     are combined; earliest/latest/peak days are aggregate dates, not event IDs.
-    Requires complete search/tile envelopes and >=99.99% valid statistics;
-    no guarantee of worldwide availability, small-fire detection or accuracy.
+    Requires complete search/tile envelopes, >=99.99% valid statistics and
+    sampled QA/reliable intervals covering the month. Shortened mapping is
+    unavailable, not a complete zero month. No full-resolution QA, worldwide
+    availability, small-fire detection or accuracy guarantee is established.
     """
     try:
         box = _bbox(bbox)
@@ -230,11 +257,17 @@ async def detect_burned_area(bbox: str, month: str) -> str:
             items = await _items(client, "modis-64A1-061", box,
                                  f"{first}T00:00:00Z/{last}T23:59:59Z")
             pieces = _pieces(items, box)
-            day_hectares = {}
+            day_hectares, coverage = {}, []
             for item, piece in pieces:
+                quality = await _mapping_coverage(client, item, piece, first, last)
+                if quality["status"] != "sampled_month_covered":
+                    return _error("Reliable sampled mapping does not cover the requested month; no complete-month aggregate computed",
+                                  "temporal_coverage_incomplete", bbox=bbox, month=first.strftime("%Y-%m"),
+                                  temporal_coverage={"status": "incomplete", "tiles": [quality]})
+                coverage.append(quality)
                 counts, values, total = await _histogram(client, "modis-64A1-061", item, "Burn_Date", piece)
                 for count, value in zip(counts, values, strict=True):
-                    if value == 0:
+                    if value == 0 or count == 0:
                         continue
                     if not first.timetuple().tm_yday <= value <= last.timetuple().tm_yday:
                         raise ValueError("Burn day outside requested month or unmapped data")
@@ -249,11 +282,13 @@ async def detect_burned_area(bbox: str, month: str) -> str:
         "source": "NASA MODIS MCD64A1 v061 (500 m), Microsoft Planetary Computer",
         "source_url": "https://doi.org/10.5067/MODIS/MCD64A1.061", "tile_ids": [item["id"] for item, _ in pieces],
         "date_semantics": "Earliest/latest/peak recorded burn day across the monthly aggregate, not individual event dates",
-        "coverage_policy": "complete tile envelopes; >=99.99% valid statistics, no truncated search",
+        "coverage_policy": "complete tile envelopes; >=99.99% valid statistics; sampled QA/intervals cover requested month",
+        "temporal_coverage": {"status": "sampled_month_covered", "tiles": coverage,
+                              "scope": "Independent categorical sampled QA/interval statistics; not full-resolution or complete uncertainty evidence"},
         "method": "Spherical clipped-bbox hectares × categorical positive Burn_Date fraction; downsampled approximation",
         "note": "Monthly detected-pixel aggregate may combine multiple fires; not an EFFIS event, polygon or exposure input",
         "warnings": ["No individual perimeter or worldwide availability/detection guarantee.",
-                     "500 m sampling, categorical downsampling and unmodeled QA/algorithm uncertainty limit interpretation.",
+                     "500 m sampling and categorical downsampling can miss unsampled QA conditions; no full-resolution or algorithm-uncertainty guarantee.",
                      "No burned pixels is not proof no fire occurred; product availability can lag the month."],
     }
     if day_hectares:
@@ -263,7 +298,7 @@ async def detect_burned_area(bbox: str, month: str) -> str:
         result.update(first_burn_date=day_date(min(day_hectares)), last_burn_date=day_date(max(day_hectares)),
                       peak_burn_date=day_date(max(day_hectares, key=day_hectares.get)))
     else:
-        result["message"] = "No burned pixels detected in valid monthly statistics; not missing-data substitution"
+        result["message"] = "No burned pixels detected in sampled statistics with observed month-coverage checks; not proof no fire occurred"
     return json.dumps(result, allow_nan=False)
 
 

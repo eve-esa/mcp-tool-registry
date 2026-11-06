@@ -169,9 +169,25 @@ def provider(request):
             if case == "stats-rejected":
                 return httpx.Response(400, json={"error": {"message": "Asset ingestion source not registered"}})
             is_cover = request.url.params["collection"] == "esa-worldcover"
-            histogram = [[50, 50], [30, 40]] if is_cover else [[80, 20], [0, 215]]
-            if case == "modis-zero" and not is_cover:
-                histogram = [[100], [0]]
+            asset = request.url.params["assets"]
+            if is_cover:
+                histogram = [[50, 50], [30, 40]]
+            elif asset == "QA":
+                if case == "qa-stats-rejected":
+                    return httpx.Response(400)
+                histogram = [[100], [7 if case == "qa-short-zero" else 1 if case == "qa-invalid-zero" else 3]]
+            elif asset == "First_Day":
+                histogram = [[100], [220 if case == "qa-interval-zero" else 200]]
+            elif asset == "Last_Day":
+                histogram = [[100], [240 if case == "qa-interval-zero" else 260]]
+            elif asset == "Burn_Date":
+                histogram = [[80, 20], [0, 215]]
+                if case in {"qa-short-zero", "qa-interval-zero", "qa-invalid-zero", "qa-stats-rejected"}:
+                    histogram = [[100], [0]]
+                if case == "modis-zero":
+                    histogram = [[100, 0], [0, 215]]
+            else:
+                raise AssertionError("Unexpected MODIS coverage asset")
             if case == "stats-empty":
                 histogram = [[0, 0], [30, 40]] if is_cover else [[0, 0], [0, 215]]
             if case == "stats-negative":
@@ -535,9 +551,30 @@ async def review_wfs(transport):
     print(f"PASS {transport}: HTTP200 WFS exceptions/unexpected roots reject, genuine empty remains empty")
 
 
+async def review_modis(transport):
+    for case in ["qa-short-zero", "qa-interval-zero", "qa-invalid-zero", "qa-stats-rejected", "modis-zero", "normal"]:
+        async with session(transport, case) as (client, _):
+            result = await call(client, "detect_burned_area", bbox="0,0,.01,.01", month="2021-08")
+            if case.startswith("qa-"):
+                assert result.get("ok") is False and "burned_area_ha" not in result, (case, result)
+                expected = "burned_area_unavailable" if case == "qa-stats-rejected" else "temporal_coverage_incomplete"
+                assert result["error_type"] == expected, (case, result)
+                if case == "qa-stats-rejected":
+                    assert result["provider_http_status"] == 400
+                else:
+                    assert result["temporal_coverage"]["status"] == "incomplete"
+            else:
+                assert result["ok"] and result["temporal_coverage"]["status"] == "sampled_month_covered", result
+                if case == "modis-zero":
+                    assert result["burned_area_ha"] == 0 and "first_burn_date" not in result, result
+                else:
+                    assert result["burned_area_ha"] == 24.7 and result["first_burn_date"] == "2021-08-03"
+    print(f"PASS {transport}: numeric-valid shortened/invalid mapping cannot become complete zero-month evidence")
+
+
 async def main():
     failures = []
-    review_checks = {"review-metrics": review_metrics, "review-wfs": review_wfs}
+    review_checks = {"review-metrics": review_metrics, "review-wfs": review_wfs, "review-modis": review_modis}
     for transport in ("stdio", "http"):
         try:
             if args.only:
@@ -565,7 +602,7 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--only", choices=["review-metrics", "review-wfs"])
+    parser.add_argument("--only", choices=["review-metrics", "review-wfs", "review-modis"])
     args = parser.parse_args()
     if args.serve:
         serve(args.transport, args.port)

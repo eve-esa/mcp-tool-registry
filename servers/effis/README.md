@@ -65,8 +65,15 @@ individual event dates; it returns no polygon and cannot feed polygon exposure.
 No detected pixels differs from unavailable data and is not proof no fire occurred.
 Both raster tools reject paginated/truncated searches, missing/overlapping tile
 envelopes, more than eight selected tiles and less than 99.99% valid statistics.
-Narrow the bbox when coverage is unsupported. Categorical downsampling and
-spherical clipped-bbox area weighting are approximate, not validated accuracy.
+Numeric validity alone does not prove full-month mapping. MODIS also checks the
+supported `QA`, `First_Day` and `Last_Day` assets: observed land/valid QA, no
+shortened-period flag, and reliable intervals spanning the requested month.
+Known incomplete mapping returns `temporal_coverage_incomplete`, never a complete
+zero-month result. Coverage metadata describes sampled categorical statistics,
+not full-resolution pixelwise QA or an uncertainty model. Zero-count categories
+do not create burn dates. Narrow the bbox when coverage is unsupported.
+Categorical downsampling and spherical clipped-bbox area weighting are approximate,
+not validated accuracy.
 No worldwide availability or complete small-fire/QA guarantee is established.
 
 **Live provider checks:** the documented PC GeoJSON statistics route previously
