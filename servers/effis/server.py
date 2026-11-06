@@ -456,6 +456,12 @@ def _gml_to_geojson(gml_text: str) -> dict:
     import xml.etree.ElementTree as ET
 
     root = ET.fromstring(gml_text)
+    if root.tag not in {"{http://www.opengis.net/wfs}FeatureCollection",
+                        "{http://www.opengis.net/gml}FeatureCollection"}:
+        raise ValueError("Expected a WFS/GML FeatureCollection, not a provider exception or unrelated XML")
+    if any(element.tag.rsplit("}", 1)[-1] in {"ServiceExceptionReport", "ExceptionReport"}
+           for element in root.iter()):
+        raise ValueError("OGC exception report is not fire data")
     ns = {
         "gml": "http://www.opengis.net/gml",
         "ms": "http://mapserver.gis.umn.edu/mapserver",
@@ -464,6 +470,12 @@ def _gml_to_geojson(gml_text: str) -> dict:
     geojson_features = []
 
     members = root.findall(".//gml:featureMember", ns) or root.findall(".//{http://www.opengis.net/gml}featureMember")
+    if not members:
+        if any(child.tag != "{http://www.opengis.net/gml}boundedBy" for child in root):
+            raise ValueError("Unrecognized feature content must not become an empty collection")
+        for key in ["numberOfFeatures", "numberReturned", "numberMatched"]:
+            if key in root.attrib and root.attrib[key] != "unknown" and int(root.attrib[key]) != 0:
+                raise ValueError("Declared feature count does not describe an empty collection")
 
     for member in members:
         feat_elem = member[0] if len(member) > 0 else member

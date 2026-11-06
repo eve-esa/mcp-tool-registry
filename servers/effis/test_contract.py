@@ -75,6 +75,14 @@ def provider(request):
     if "effis" in request.url.host:
         if case == "lookup-error":
             return httpx.Response(503)
+        if case == "wfs-exception":
+            return httpx.Response(200, text='<ServiceExceptionReport><ServiceException code="InvalidParameterValue">Layer unavailable</ServiceException></ServiceExceptionReport>')
+        if case == "wfs-ows-exception":
+            return httpx.Response(200, text='<ows:ExceptionReport xmlns:ows="http://www.opengis.net/ows"><ows:Exception>Unavailable</ows:Exception></ows:ExceptionReport>')
+        if case == "wfs-unexpected":
+            return httpx.Response(200, text='<html><body>Provider maintenance</body></html>')
+        if case == "wfs-empty":
+            return httpx.Response(200, text='<wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs" xmlns:gml="http://www.opengis.net/gml" numberOfFeatures="0"><gml:boundedBy><gml:null>missing</gml:null></gml:boundedBy></wfs:FeatureCollection>')
         # GML2/EPSG:4326 uses latitude/longitude axis order in this inherited parser.
         return httpx.Response(200, text='''<gml:FeatureCollection xmlns:gml="http://www.opengis.net/gml"
           xmlns:ms="http://mapserver.gis.umn.edu/mapserver"><gml:featureMember><ms:fire>
@@ -513,15 +521,31 @@ async def review_metrics(transport):
     print(f"PASS {transport}: derived metric directory and every published file/plot/composite sink confined")
 
 
+async def review_wfs(transport):
+    for case in ["wfs-exception", "wfs-ows-exception", "wfs-unexpected", "wfs-empty"]:
+        async with session(transport, case) as (client, _):
+            for date in ["today", "2021-08-03"]:
+                value = await call(client, "get_effis_burnt_areas", bbox="-1,-1,1,1", date=date,
+                                   max_features=1, include_perimeter=True)
+                if case == "wfs-empty":
+                    assert value.get("ok") is not False and value["total_features"] == 0 and value["fires"] == [], value
+                else:
+                    assert value.get("ok") is False and value.get("error_type") == "lookup_unavailable", (case, date, value)
+                    assert "total_features" not in value, "Provider exception must not become a successful zero"
+    print(f"PASS {transport}: HTTP200 WFS exceptions/unexpected roots reject, genuine empty remains empty")
+
+
 async def main():
     failures = []
+    review_checks = {"review-metrics": review_metrics, "review-wfs": review_wfs}
     for transport in ("stdio", "http"):
         try:
-            if args.only == "review-metrics":
-                await review_metrics(transport)
+            if args.only:
+                await review_checks[args.only](transport)
             else:
                 await checks(transport)
-                await review_metrics(transport)
+                for check in review_checks.values():
+                    await check(transport)
         except Exception as exc:
             pending, messages = [exc], []
             while pending:
@@ -541,7 +565,7 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--only", choices=["review-metrics"])
+    parser.add_argument("--only", choices=["review-metrics", "review-wfs"])
     args = parser.parse_args()
     if args.serve:
         serve(args.transport, args.port)
