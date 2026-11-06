@@ -1,0 +1,22 @@
+sequenceDiagram
+    actor User
+    participant Host as EVE host
+    participant LLM
+    participant Server as Wildfire server
+
+    Note over User,Server: Prompt. The user chooses it.
+    User->>Host: /wildfire_briefing place="Evia"
+    Host->>Server: prompts/get wildfire_briefing
+    Server-->>Host: User message template
+
+    Note over Host,Server: Resource. The host loads it.
+    Host->>Server: resources/read resource://aoi/evia
+    Server-->>Host: AOI polygon as GeoJSON
+
+    Note over Host,Server: Tool. The model calls it.
+    Host->>LLM: Message, AOI, and tool list
+    LLM->>Host: Call get_effis_burnt_areas(bbox, date)
+    Host->>Server: tools/call get_effis_burnt_areas
+    Server-->>Host: Fires with area_ha, commune, firedate
+    Host->>LLM: Observation
+    LLM-->>User: Briefing that cites each tool

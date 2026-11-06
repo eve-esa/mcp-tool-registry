@@ -1,0 +1,22 @@
+flowchart LR
+    subgraph py["Python, under @mcp.tool()"]
+        fn["Function name<br/>lookup_aoi"]
+        doc["Docstring<br/>summary, Args, Returns"]
+        hints["Parameters<br/>Annotated[str, Field(description=...)]"]
+        ret["Return annotation<br/>-> AOI (TypedDict)"]
+        ann["annotations=<br/>ToolAnnotations(...)"]
+    end
+
+    subgraph wire["One entry in tools/list"]
+        name["name"]
+        desc["description"]
+        ins["inputSchema<br/>properties, required, ranges"]
+        outs["outputSchema"]
+        anns["annotations<br/>readOnlyHint, openWorldHint"]
+    end
+
+    fn --> name
+    doc --> desc
+    hints --> ins
+    ret --> outs
+    ann --> anns

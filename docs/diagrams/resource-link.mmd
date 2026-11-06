@@ -1,0 +1,12 @@
+sequenceDiagram
+    participant Tool as Tool
+    participant Host as EVE host
+    participant Res as Resource
+    participant Store as Object storage
+
+    Tool->>Host: Text summary plus ResourceLink
+    Note over Host: URI, name, and mime type only
+    Host->>Res: resources/read
+    Res-->>Host: File bytes
+    Host->>Store: Store the bytes
+    Host->>Host: Replace the link with an artifact stub

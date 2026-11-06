@@ -1,0 +1,32 @@
+flowchart LR
+    user([EVE user])
+
+    subgraph host["MCP host: EVE"]
+        agent["ReAct agent<br/>(LLM + loop)"]
+        c1["MCP client<br/>geocode"]
+        c2["MCP client<br/>effis"]
+        c3["MCP client<br/>serpapi"]
+        agent --- c1
+        agent --- c2
+        agent --- c3
+    end
+
+    subgraph registry["Registry servers"]
+        s1["Server: geocode<br/>geocode_place<br/>reverse_geocode_place"]
+        s2["Server: effis<br/>get_effis_burnt_areas<br/>compute_metrics"]
+        s3["Server: serpapi<br/>search_google"]
+    end
+
+    subgraph upstream["Upstream services"]
+        u1[("OpenStreetMap<br/>Nominatim")]
+        u2[("EFFIS WFS<br/>Copernicus Data Space")]
+        u3[("SerpAPI<br/>Google Search")]
+    end
+
+    user --> agent
+    c1 -- "Streamable HTTP" --> s1
+    c2 -- "Streamable HTTP" --> s2
+    c3 -- "Streamable HTTP" --> s3
+    s1 --> u1
+    s2 --> u2
+    s3 --> u3
