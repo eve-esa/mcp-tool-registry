@@ -160,6 +160,8 @@ def provider(request):
             ids = ["fixture_2020_tile", "fixture_2021_tile"] if collection == "esa-worldcover" else ["modis_2021_08"]
             if case == "stac-partial":
                 bounds[2] = (bounds[0] + bounds[2]) / 2
+            if case == "stac-id-huge":
+                ids = [name + "x" * 513 for name in ids]
             if case == "stac-overlap":
                 ids.append("extra_2020_tile" if collection == "esa-worldcover" else "extra_modis_tile")
             features = [] if case == "stac-empty" else [{"id": name, "bbox": bounds} for name in ids]
@@ -572,9 +574,58 @@ async def review_modis(transport):
     print(f"PASS {transport}: numeric-valid shortened/invalid mapping cannot become complete zero-month evidence")
 
 
+async def review_provenance(transport):
+    async with session(transport) as (client, _):
+        supplied = deepcopy(FEATURE)
+        supplied["id"] = "caller-event-42"
+        exposed = await call(client, "get_fire_exposure", perimeter=supplied)
+        identity = exposed.get("perimeter_provenance", {})
+        fuels = await call(client, "get_burn_fuel_types", bbox="23.2,38.7,23.4,38.9", fire_date="2019-08-03")
+        automatic = await call(client, "estimate_fire_emissions", burned_area_ha=10,
+                               bbox="23.2,38.7,23.4,38.9", fire_date="2019-08-03")
+        provenance = automatic.get("fuel_provenance", {})
+        failures = []
+        if identity.get("feature_id") != "caller-event-42" or identity.get("authenticated") is not False:
+            failures.append("supplied inline identity/unauthenticated status was lost")
+        for key in ["source", "tile_ids", "source_url", "attribution", "map_choice", "pre_fire_map"]:
+            if provenance.get(key) != fuels[key]:
+                failures.append("automatic WorldCover provenance lost: " + key)
+        if provenance.get("worldcover_version") != "v100" or provenance.get("worldcover_year") != 2020:
+            failures.append("automatic map version/year was lost")
+        if provenance.get("pre_fire_map") is not False or "not pre-fire" not in provenance.get("map_choice", ""):
+            failures.append("pre-2020 temporal proxy is not explicit")
+        if fuels["source_url"] not in {s["url"] for s in automatic["sources"]}:
+            failures.append("land-cover citation missing from composed source list")
+        assert not failures, failures
+        fingerprint = identity["fingerprint"]
+        assert len(fingerprint) == 64 and set(fingerprint) <= set("0123456789abcdef")
+        reordered = {k: supplied[k] for k in reversed(supplied)}
+        repeated = await call(client, "get_fire_exposure", perimeter=reordered)
+        assert repeated["perimeter_provenance"]["fingerprint"] == fingerprint
+        changed = deepcopy(supplied)
+        changed["properties"]["FIREDATE"] = "2021-08-04"
+        different = await call(client, "get_fire_exposure", perimeter=changed)
+        assert different["perimeter_provenance"]["fingerprint"] != fingerprint
+        found = await call(client, "get_effis_burnt_areas", bbox="-1,-1,1,1", date="today",
+                           include_perimeter=True, max_features=1)
+        fire = found["fires"][0]
+        handoff = await call(client, "get_fire_exposure", perimeter=fire["perimeter"])
+        assert handoff["perimeter_provenance"] == fire["perimeter_provenance"]
+        assert len(json.dumps(provenance).encode()) < 20_000
+        supplied["id"] = "x" * 513
+        bounded = await call(client, "get_fire_exposure", perimeter=supplied)
+        assert bounded["perimeter_provenance"]["feature_id"] is None
+    async with session(transport, "stac-id-huge") as (client, _):
+        unavailable = await call(client, "estimate_fire_emissions", burned_area_ha=10,
+                                 bbox="23.2,38.7,23.4,38.9", fire_date="2019-08-03")
+        assert unavailable.get("ok") is False and unavailable["error_type"] == "fuel_unavailable"
+    print(f"PASS {transport}: bounded composed WorldCover temporal/citation provenance and unauthenticated perimeter fingerprint")
+
+
 async def main():
     failures = []
-    review_checks = {"review-metrics": review_metrics, "review-wfs": review_wfs, "review-modis": review_modis}
+    review_checks = {"review-metrics": review_metrics, "review-wfs": review_wfs, "review-modis": review_modis,
+                     "review-provenance": review_provenance}
     for transport in ("stdio", "http"):
         try:
             if args.only:
@@ -602,7 +653,7 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--only", choices=["review-metrics", "review-wfs", "review-modis"])
+    parser.add_argument("--only", choices=["review-metrics", "review-wfs", "review-modis", "review-provenance"])
     args = parser.parse_args()
     if args.serve:
         serve(args.transport, args.port)

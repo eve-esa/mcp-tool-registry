@@ -203,6 +203,17 @@ def _artifact_path(value: str | None = None, *, existing: bool = False) -> Path:
     return path
 
 
+def _perimeter_provenance(feature: dict) -> dict:
+    """Identity of the already-bounded normalized input, not EFFIS authentication."""
+    identifier = feature.get("id")
+    if not isinstance(identifier, str) or len(identifier.encode()) > 512:
+        identifier = None
+    canonical = json.dumps(feature, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return {"feature_id": identifier, "fingerprint": hashlib.sha256(canonical).hexdigest(),
+            "fingerprint_method": "SHA-256 sorted compact JSON of supplied bounded Feature (including properties)",
+            "authenticated": False, "scope": "Caller-supplied identity; not verified EFFIS event or geometry-equivalence proof"}
+
+
 def _bounded_perimeter(feature: dict) -> dict:
     """Bounded WGS84 GeoJSON input, not proof of EFFIS provenance."""
     from shapely.geometry import shape
@@ -1015,6 +1026,7 @@ async def get_effis_burnt_areas(
             ))
             if include_perimeter:
                 rec["perimeter"] = _bounded_perimeter(feat)
+                rec["perimeter_provenance"] = _perimeter_provenance(rec["perimeter"])
             rec.update({
                 "feature_index": feature_index,
                 "area_ha": area_ha,
@@ -2933,6 +2945,7 @@ async def get_fire_exposure(
                 raise ValueError("Invalid feature index")
             perimeter = document["features"][feature_index]
         feature = _bounded_perimeter(perimeter)
+        identity = _perimeter_provenance(feature)
         geometry = shape(feature["geometry"])
         west, south, east, north = geometry.bounds
         zone = min(60, int(((west + east) / 2 + 180) / 6) + 1)
@@ -2950,7 +2963,7 @@ async def get_fire_exposure(
              f'node["place"]["name"]({south},{west},{north},{east}););out geom;')
     export = bool(path) if export is None else export
     prefix = path.with_name(f"{path.stem}_feature_{feature_index}_exposure") if path else (
-        DEFAULT_SAVE_DIR / ("exposure_" + hashlib.sha256(json.dumps(feature).encode()).hexdigest()[:16]))
+        DEFAULT_SAVE_DIR / ("exposure_" + identity["fingerprint"][:16]))
     warnings, cached, data = [], False, None
     if path and not refresh:
         try:
@@ -3052,6 +3065,7 @@ async def get_fire_exposure(
         "ok": True, "source": "OpenStreetMap / Overpass", "feature_index": feature_index,
         "fire_date": feature.get("properties", {}).get("FIREDATE"),
         "perimeter_source": "caller-supplied GeoJSON; provenance not independently authenticated",
+        "perimeter_provenance": identity,
         "centroid": {"latitude": centroid.y, "longitude": centroid.x},
         "building_way_count": buildings, "road_km": sum(roads.values()) / 1000,
         "road_km_by_class": {k: v / 1000 for k, v in sorted(roads.items())},

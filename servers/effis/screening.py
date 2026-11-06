@@ -112,7 +112,8 @@ def _pieces(items, box):
         raise ValueError("No suitable data or too many tiles; narrow the bbox")
     pieces, identifiers = [], set()
     for item in items:
-        if not isinstance(item["id"], str) or item["id"] in identifiers:
+        if (not isinstance(item["id"], str) or not item["id"] or len(item["id"].encode()) > 512
+                or item["id"] in identifiers):
             raise ValueError("Invalid/duplicate tile identifier")
         identifiers.add(item["id"])
         tile = _bbox(",".join(str(v) for v in item["bbox"]))
@@ -193,7 +194,7 @@ async def get_burn_fuel_types(bbox: str, fire_date: str | None = None) -> str:
               else f"{year} map (not pre-fire for this event; temporal proxy)" if fire
               else f"{year} map; fire date unknown, pre-fire relation unknown")
     return json.dumps({
-        "ok": True, "bbox": bbox, "fire_date": fire_date, "worldcover_year": year, "pre_fire_map": pre_fire,
+        "ok": True, "bbox": bbox, "fire_date": fire_date, "worldcover_year": year, "worldcover_version": "v100" if year == 2020 else "v200", "pre_fire_map": pre_fire,
         "map_choice": choice, "source": f"ESA WorldCover {year} {'v100' if year == 2020 else 'v200'} via Planetary Computer",
         "box_hectares_by_class": hectares, "fuel_shares_pct": {k: 100 * v / total for k, v in burnable.items()},
         "tile_ids": [item["id"] for item, _ in pieces], "coverage_policy": "complete tile envelopes; >=99.99% valid stats",
@@ -324,12 +325,16 @@ async def estimate_fire_emissions(
     except (ValueError, TypeError, AttributeError, OverflowError):
         return _error("Supply a finite positive area compatible with the bbox and a valid optional ISO date")
     fuel_source = "caller-supplied shares; not independently authenticated or clipped to burnt pixels"
+    fuel_provenance = {"kind": "caller_supplied", "event_identity_authenticated": False, "note": fuel_source}
     if fuel_shares_pct is None:
         fuels = json.loads(await get_burn_fuel_types(bbox, fire_date))
         if not fuels["ok"]:
             return json.dumps(fuels)
         fuel_shares_pct = fuels["fuel_shares_pct"]
         fuel_source = f"WorldCover {fuels['worldcover_year']} bbox proxy, not burnt-pixel composition"
+        fuel_provenance = {"kind": "worldcover_bbox_proxy", "event_identity_authenticated": False,
+                           **{key: fuels[key] for key in ["source", "worldcover_year", "worldcover_version", "tile_ids",
+                              "source_url", "attribution", "map_choice", "pre_fire_map", "coverage_policy", "note", "warnings"]}}
     try:
         if not isinstance(fuel_shares_pct, dict) or not fuel_shares_pct:
             raise ValueError("Supply fuel shares")
@@ -368,6 +373,7 @@ async def estimate_fire_emissions(
     return json.dumps({
         "ok": True, "method_version": VERSION, "burned_area_ha": area, "bbox": bbox, "fire_date": fire_date,
         "area_provenance": "caller supplied; no independent EFFIS/event authentication", "fuel_source": fuel_source,
+        "fuel_provenance": fuel_provenance,
         "biome": biome, "biome_method": "absolute-latitude heuristic (<23.5 tropical, >50 boreal), not mapped ecozone",
         "fuel_shares_pct_used": {k: 100 * v / total for k, v in shares.items()},
         "excluded_non_fuel_classes": sorted(set(weights) & NON_FUEL),
@@ -377,7 +383,10 @@ async def estimate_fire_emissions(
         "method": "area ha × consumed dry matter t/ha × emission factor g/kg ÷ 1000 = gas/particle tonnes",
         "gwp100": {"values": GWP100, "version": "AR6 WGI 2021 Table 7.15, non-fossil CH4", "source": AR6},
         "sources": [{"url": IPCC, "section": "Eq. 2.27 and Tables 2.4/2.5"},
-                    {"url": ANDREAE, "section": "Table 1 PM2.5 means"}, {"url": EPA, "basis": "4.6 t tailpipe CO2/car-year"}],
+                    {"url": ANDREAE, "section": "Table 1 PM2.5 means"}, {"url": EPA, "basis": "4.6 t tailpipe CO2/car-year"}]
+                   + ([{"url": fuel_provenance["source_url"], "kind": "land_cover",
+                        "reference_year": fuel_provenance["worldcover_year"], "version": fuel_provenance["worldcover_version"]}]
+                      if fuel_provenance["kind"] == "worldcover_bbox_proxy" else []),
         "warnings": ["SCREENING estimate, not measured emissions or validated accuracy.",
                      "Low/high are selected alternative fuel-consumption scenarios, not statistical bounds or complete uncertainty.",
                      "Fuel transfers and latitude-based forest classes are explicit proxies; soil/peat combustion is excluded.",

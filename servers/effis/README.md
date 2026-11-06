@@ -16,7 +16,10 @@ and at most 2500 km². Results count current OSM building ways, clipped road km
 and named place points; they do not measure damage, population or historical
 asset completeness. Relation-only/unmapped and enclosing OSM ways may be absent.
 OSM timestamps and attribution are returned; supplied perimeter provenance is
-not independently authenticated.
+not independently authenticated. Lookup and exposure retain a SHA-256 fingerprint
+of sorted compact JSON for the bounded supplied Feature (including properties),
+plus a bounded string identifier when present. The fingerprint is input identity,
+not EFFIS authentication or geometry-equivalence proof; `authenticated` stays false.
 
 Legacy GeoJSON path/index inputs and optional diagnostic exports are confined
 to `DEFAULT_SAVE_DIR` (default `/tmp/fire_maps`), including producer overrides.
@@ -92,7 +95,12 @@ or the WorldCover proxy. Area is not authenticated as an EFFIS event. All numeri
 inputs must be finite/nonnegative (area positive); area may not exceed spherical
 bbox area by more than the documented 5% envelope tolerance. Unsupported/empty
 burnable shares are unavailable, not zero emissions. The retained gas, CO2e,
-car-year and by-fuel outputs carry units and explicit assumptions.
+car-year and by-fuel outputs carry units and explicit assumptions. Automatic
+screening also retains bounded WorldCover version/year/tile IDs, DOI/attribution,
+map choice and pre-fire relationship in `fuel_provenance` and its source list.
+It does not turn a later map into a pre-fire observation or authenticate an event;
+manual shares remain caller-supplied. Tile identifiers are bounded to 512 bytes
+and at most eight selected tiles.
 
 **screening-v1 factor basis:**
 
