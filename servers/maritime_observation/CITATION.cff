@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: Maritime Observation MCP Server
+abstract: >-
+  MCP tools for historical vessel activity, processed Sentinel-1 radar detections,
+  detailed AIS positions, and AIS overlays on Sentinel-2 scenes.
+authors:
+  - given-names: Francesco
+    family-names: Piccolo
+    alias: francescoopiccolo
+  - given-names: Bashudev
+    family-names: Neupane
+    alias: Vashudeva
+keywords:
+  - earth-observation
+  - maritime
+  - ais
+  - sentinel
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/maritime_observation
