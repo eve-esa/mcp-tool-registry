@@ -23,6 +23,8 @@ Requirements:
 Environment (optional ``effis/.env`` — loaded automatically):
     CDSE_CLIENT_ID, CDSE_CLIENT_SECRET — Copernicus Data Space / Sentinel Hub OAuth
     EFFIS_SHAPEFILE_DIR — path to local EFFIS ``modis.ba.poly`` shapefile directory
+    EFFIS_SAVE_DIR — local use only: write output files here and return their
+        paths instead of embedding the bytes in the tool result
 """
 
 from __future__ import annotations
@@ -178,11 +180,36 @@ def _add_months(dt: datetime, months: int) -> datetime:
     return dt.replace(year=year, month=month, day=day)
 
 
-# EVE stores ImageContent and BlobResourceContents from the tool result.
-# It skips a file over 25 MB and skips files past 10 per call.
-# https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-result
-_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-_MAX_ATTACHMENTS = 10
+# The EVE backend stores ImageContent and BlobResourceContents from the tool
+# result and skips files past ARTIFACT_MAX_BYTES / ARTIFACT_MAX_PER_TOOL_CALL
+# (defaults 25 MB and 10). These caps are twice those defaults, so EVE keeps
+# the extra files only where its deployment raises both. The MCP spec sets no
+# cap on content blocks or their size.
+_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+_MAX_ATTACHMENTS = 20
+
+
+def _size_limit_text() -> str:
+    mib, rest = divmod(_MAX_ATTACHMENT_BYTES, 1024 * 1024)
+    return f"{mib} MB" if mib and not rest else f"{_MAX_ATTACHMENT_BYTES} bytes"
+
+
+def _omitted_files_note(omitted: list[str]) -> str:
+    return (
+        "Some files were not attached so this response stays within "
+        f"{_MAX_ATTACHMENTS} files and {_size_limit_text()} each: "
+        + "; ".join(omitted) + "."
+    )
+
+
+def _local_save_dir() -> Path | None:
+    """EFFIS_SAVE_DIR set: write files there and return paths, not bytes.
+
+    Only for a server that shares a filesystem with its client. A remote
+    client cannot open the returned paths.
+    """
+    raw = os.getenv("EFFIS_SAVE_DIR", "").strip()
+    return Path(raw).expanduser().resolve() if raw else None
 
 # DBF language-driver ID (header byte 29) -> Python codec.
 # GDAL GetEncodingFromLDIDNumber, LDID 87 is ISO-8859-1 (not CP1252):
@@ -474,7 +501,7 @@ def _select_attachments(
     for item in sorted(ranked, key=lambda row: row[0]):
         _rank, name, _mime, data = item
         if len(data) > _MAX_ATTACHMENT_BYTES:
-            omitted.append(f"{name} ({len(data)} bytes, over the 25 MB limit)")
+            omitted.append(f"{name} ({len(data)} bytes, over the {_size_limit_text()} limit)")
             continue
         if len(kept) >= slots:
             omitted.append(name)
@@ -489,22 +516,37 @@ def _attachment_block(name: str, mime: str, data: bytes) -> ImageContent | Embed
     return _blob_block(name, mime, data)
 
 
+def _save_files(out_dir: Path, files: list[tuple[int, str, str, bytes]]) -> list[dict]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for _rank, name, mime, data in sorted(files, key=lambda row: row[0]):
+        path = out_dir / name
+        path.write_bytes(data)
+        saved.append({"name": name, "path": str(path), "mime_type": mime, "bytes": len(data)})
+    return saved
+
+
 def _burnt_area_blocks(
     summary: dict,
     geojson: dict | None,
     filename: str,
 ) -> list[TextContent | EmbeddedResource]:
+    local_dir = _local_save_dir()
+    if geojson is not None and local_dir is not None:
+        raw = json.dumps(geojson).encode("utf-8")
+        saved = _save_files(local_dir, [(0, filename, "application/geo+json", raw)])
+        summary["geojson_path"] = saved[0]["path"]
     blocks: list[TextContent | EmbeddedResource] = [
         _text_block(json.dumps(summary, default=str)),
     ]
-    if geojson is None:
+    if geojson is None or local_dir is not None:
         return blocks
     raw = json.dumps(geojson).encode("utf-8")
     if len(raw) > _MAX_ATTACHMENT_BYTES:
         blocks.append(
             _text_block(
                 "The burnt-area polygons were too large to attach "
-                f"({len(raw)} bytes; limit is 25 MB). "
+                f"({len(raw)} bytes; limit is {_size_limit_text()}). "
                 "Request a smaller bbox or a lower max_features."
             )
         )
@@ -897,9 +939,10 @@ async def get_effis_burnt_areas(
 
     Returns:
         A text summary of fires (bbox, area_ha, commune, country, firedate)
-        and, when it fits under 25 MB, the GeoJSON polygons as an embedded
-        file. Fires that cross the antimeridian also include ``bboxes`` and
-        ``antimeridian_split``.
+        and, when it fits under 50 MB, the GeoJSON polygons as an embedded
+        file. With EFFIS_SAVE_DIR set, the GeoJSON is written there instead
+        and the summary gives its path in ``geojson_path``. Fires that cross
+        the antimeridian also include ``bboxes`` and ``antimeridian_split``.
     """
 
     # Resolve date shortcuts and build WFS params
@@ -2159,6 +2202,9 @@ async def compute_metrics(
         had zero usable scenes after catalog search/AOI screening, so that
         phase's observations and images are empty while the other phase and
         the burn mask may still be fine. Surface these warnings to the user.
+        Plots, the recovery CSV and the full metrics JSON follow as attached
+        files (at most 20). With EFFIS_SAVE_DIR set, every file is written
+        there instead and listed with its path under "files".
     """
 
     if recovery_months is None:
@@ -2652,8 +2698,12 @@ async def compute_metrics(
             for metric_name in scene_metrics:
                 vis_candidates.append((phase, scene_date, metric_name, cloud_cover))
 
-    kept_preview, _ = _select_attachments(files, slots=_MAX_ATTACHMENTS - 1)
-    vis_room = (_MAX_ATTACHMENTS - 1) - len(kept_preview)
+    local_dir = _local_save_dir()
+    if local_dir is not None:
+        vis_room = len(vis_candidates)
+    else:
+        kept_preview, _ = _select_attachments(files, slots=_MAX_ATTACHMENTS - 1)
+        vis_room = (_MAX_ATTACHMENTS - 1) - len(kept_preview)
     vis_omitted_note = None
     if len(vis_candidates) > vis_room:
         vis_omitted_note = (
@@ -2762,28 +2812,25 @@ async def compute_metrics(
             "time_steps": result["recovery"].get("time_steps", []),
         }
 
-    kept, omitted = _select_attachments(files, slots=_MAX_ATTACHMENTS - 1)
+    if local_dir is not None:
+        kept, omitted = list(files), []
+    else:
+        kept, omitted = _select_attachments(files, slots=_MAX_ATTACHMENTS - 1)
     omitted_notes = list(omitted)
     if vis_omitted_note:
         omitted_notes.append(vis_omitted_note)
     if omitted_notes:
         summary["omitted_files"] = omitted_notes
-        summary["omitted_files_note"] = (
-            "Some files were not attached so this response stays within "
-            "10 files and 25 MB each: " + "; ".join(omitted_notes) + "."
-        )
+        summary["omitted_files_note"] = _omitted_files_note(omitted_notes)
     result["summary"] = summary
 
     json_name = f"metrics_{fire_date}.json"
     json_bytes = json.dumps(result, indent=2, default=str).encode("utf-8")
     attached = list(kept)
-    if len(json_bytes) > _MAX_ATTACHMENT_BYTES:
-        omitted_notes.append(f"{json_name} ({len(json_bytes)} bytes, over the 25 MB limit)")
+    if local_dir is None and len(json_bytes) > _MAX_ATTACHMENT_BYTES:
+        omitted_notes.append(f"{json_name} ({len(json_bytes)} bytes, over the {_size_limit_text()} limit)")
         summary["omitted_files"] = omitted_notes
-        summary["omitted_files_note"] = (
-            "Some files were not attached so this response stays within "
-            "10 files and 25 MB each: " + "; ".join(omitted_notes) + "."
-        )
+        summary["omitted_files_note"] = _omitted_files_note(omitted_notes)
         result["summary"] = summary
     else:
         attached.append((40, json_name, "application/json", json_bytes))
@@ -2809,6 +2856,10 @@ async def compute_metrics(
             "time_steps": result["recovery"]["time_steps"],
             "table": result["recovery"].get("table"),
         }
+    if local_dir is not None:
+        out_dir = local_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"
+        compact["files"] = _save_files(out_dir, attached)
+        return [_text_block(json.dumps(compact, default=str))]
     blocks: list[TextContent | ImageContent | EmbeddedResource] = [
         _text_block(json.dumps(compact, default=str)),
     ]

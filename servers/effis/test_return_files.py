@@ -215,14 +215,14 @@ def test_geojson_over_size_limit(tmp: Path) -> None:
     assert blocks[0].type == "text"
     assert blocks[1].type == "text"
     assert "too large to attach" in blocks[1].text
-    assert "25 MB" in blocks[1].text
+    assert "limit is 40 bytes" in blocks[1].text
     assert "bbox" in blocks[1].text
     assert "max_features" in blocks[1].text
     assert all(block.type != "resource" for block in blocks)
     summary = json.loads(blocks[0].text)
     assert summary["fires"]
     _assert_text_has_no_paths(blocks)
-    print("  [PASS] GeoJSON over 25 MB is a note, not a blob")
+    print("  [PASS] GeoJSON over the size limit is a note, not a blob")
 
 
 def _fake_composite(token, bounds, size, time_from, time_to, max_cloud, metric):
@@ -266,8 +266,23 @@ async def _compute(**overrides):
         return await server.compute_metrics(**args)
 
 
-def test_compute_metrics_file_cap_and_types() -> None:
+def test_default_limits_attach_whole_run() -> None:
+    assert server._MAX_ATTACHMENTS == 20
+    assert server._MAX_ATTACHMENT_BYTES == 50 * 1024 * 1024
+    assert server._size_limit_text() == "50 MB"
     blocks = asyncio.run(_compute())
+    summary = json.loads(blocks[0].text)
+    assert "omitted_files" not in summary["summary"]
+    names = [str(b.resource.uri).rsplit("/", 1)[-1] for b in blocks if b.type == "resource"]
+    assert names == ["recovery_2020-06-01.csv", "metrics_2020-06-01.json"]
+    files = _file_blocks(blocks)
+    assert 10 < len(files) <= server._MAX_ATTACHMENTS
+    print(f"  [PASS] default 20-file / 50 MB caps attach all {len(files)} files")
+
+
+def test_compute_metrics_file_cap_and_types() -> None:
+    with patch.object(server, "_MAX_ATTACHMENTS", 10):
+        blocks = asyncio.run(_compute())
     tool = server.mcp._tool_manager.get_tool("compute_metrics")
     assert tool.fn_metadata.output_schema is None
     converted = tool.fn_metadata.convert_result(blocks)
@@ -283,7 +298,6 @@ def test_compute_metrics_file_cap_and_types() -> None:
 
     files = _file_blocks(blocks)
     assert len(files) == 10
-    assert len(files) <= server._MAX_ATTACHMENTS
 
     severity = Image.open(BytesIO(base64.b64decode(blocks[1].data)))
     burn = Image.open(BytesIO(base64.b64decode(blocks[2].data)))
@@ -309,7 +323,7 @@ def test_compute_metrics_file_cap_and_types() -> None:
             raw = base64.b64decode(block.data)
             assert raw.startswith(b"\x89PNG")
             assert block.mimeType == "image/png"
-    print("  [PASS] compute_metrics attaches 10 files and drops the rest")
+    print("  [PASS] a 10-file cap attaches 10 files and drops the rest")
 
 
 def test_compute_metrics_size_limit() -> None:
@@ -324,10 +338,44 @@ def test_compute_metrics_size_limit() -> None:
     assert _file_blocks(blocks) == []
     summary = json.loads(blocks[0].text)
     note = summary["summary"]["omitted_files_note"]
-    assert "25 MB" in note
+    assert "over the 8 bytes limit" in note
     assert "severity_map.png" in note
     _assert_text_has_no_paths(blocks)
     print("  [PASS] compute_metrics drops files over the size limit")
+
+
+def test_local_save_dir_returns_paths(tmp: Path) -> None:
+    shp = _write_fire_shapefile(tmp / "local_src", "Avinyó", "latin-1")
+    _set_ldid(shp, 0x57)
+    out = tmp / "local_out"
+    with (
+        patch.dict("os.environ", {"EFFIS_SAVE_DIR": str(out)}),
+        patch.object(server, "_MAX_ATTACHMENTS", 10),
+    ):
+        burnt = asyncio.run(_burnt_areas(tmp / "local_src"))
+        metrics = asyncio.run(_compute())
+
+    assert [block.type for block in burnt] == ["text"]
+    summary = json.loads(burnt[0].text)
+    geojson_path = Path(summary["geojson_path"])
+    assert geojson_path.is_absolute() and geojson_path.parent == out.resolve()
+    assert geojson_path.name.startswith("burnt_areas_2024-08-01_")
+    geojson = json.loads(geojson_path.read_text(encoding="utf-8"))
+    assert geojson["features"][0]["properties"]["COMMUNE"] == "Avinyó"
+
+    assert [block.type for block in metrics] == ["text"]
+    compact = json.loads(metrics[0].text)
+    names = [entry["name"] for entry in compact["files"]]
+    assert names[:4] == ["severity_map.png", "burn_mask.png", "recovery_2020-06-01.png", "recovery_2020-06-01.csv"]
+    assert "metrics_2020-06-01.json" in names
+    assert "composite_ndvi_Tplus_48mo.png" in names
+    assert len(names) > 10
+    assert "omitted_files" not in compact["summary"]
+    for entry in compact["files"]:
+        path = Path(entry["path"])
+        assert path.is_file() and path.stat().st_size == entry["bytes"]
+    assert Path(compact["files"][0]["path"]).read_bytes().startswith(b"\x89PNG")
+    print("  [PASS] EFFIS_SAVE_DIR writes every file and returns paths, no bytes")
 
 
 def run_return_file_tests() -> None:
@@ -342,6 +390,8 @@ def run_return_file_tests() -> None:
         test_cpg_greek_and_literal_question_marks(tmp)
         test_gml_utf8_greek(tmp)
         test_geojson_over_size_limit(tmp)
+        test_local_save_dir_returns_paths(tmp)
+    test_default_limits_attach_whole_run()
     test_compute_metrics_file_cap_and_types()
     test_compute_metrics_size_limit()
 
