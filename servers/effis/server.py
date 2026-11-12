@@ -28,6 +28,8 @@ Environment (optional ``effis/.env`` — loaded automatically):
 from __future__ import annotations
 
 import asyncio
+import base64
+import codecs
 import hashlib
 import io
 import json
@@ -47,6 +49,7 @@ import pandas as pd
 import tifffile
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.types import BlobResourceContents, EmbeddedResource, ImageContent, TextContent
 from PIL import Image as PILImage
 
 # Headless server: select Agg before any pyplot import (matplotlib.use docs).
@@ -175,9 +178,83 @@ def _add_months(dt: datetime, months: int) -> datetime:
     return dt.replace(year=year, month=month, day=day)
 
 
-# Default directory for saving downloaded map images
-# Use /tmp in cloud runtimes (ephemeral but always writable)
-DEFAULT_SAVE_DIR = Path(os.getenv("DEFAULT_SAVE_DIR", "/tmp/fire_maps"))
+# EVE stores ImageContent and BlobResourceContents from the tool result.
+# It skips a file over 25 MB and skips files past 10 per call.
+# https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-result
+_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_MAX_ATTACHMENTS = 10
+
+# DBF language-driver ID (header byte 29) -> Python codec.
+# GDAL GetEncodingFromLDIDNumber, LDID 87 is ISO-8859-1 (not CP1252):
+# https://github.com/OSGeo/gdal/blob/release/3.9/ogr/ogrsf_frmts/shape/ogrshapelayer.cpp
+# ID table: http://www.autopark.ru/ASBProgrammerGuide/DBFSTRUC.HTM
+# EFFIS SHAPEZIP ships no .cpg and sets LDID 0x57. Latin accents in that
+# file are real ISO-8859-1 bytes (0xF3 is ó). Greek commune text in the
+# same DBF is already ASCII 0x3F, so no codec can restore it. WFS GML is
+# UTF-8 and still has the Greek names.
+_DBF_LDID_ENCODING: dict[int, str] = {
+    1: "cp437",
+    2: "cp850",
+    3: "cp1252",
+    4: "mac_roman",
+    8: "cp865",
+    10: "cp850",
+    11: "cp437",
+    13: "cp437",
+    14: "cp850",
+    15: "cp437",
+    16: "cp850",
+    17: "cp437",
+    18: "cp850",
+    19: "cp932",
+    20: "cp850",
+    21: "cp437",
+    22: "cp850",
+    23: "cp865",
+    24: "cp437",
+    25: "cp437",
+    26: "cp850",
+    27: "cp437",
+    28: "cp863",
+    29: "cp850",
+    31: "cp852",
+    34: "cp852",
+    35: "cp852",
+    36: "cp860",
+    37: "cp850",
+    38: "cp866",
+    55: "cp850",
+    64: "cp852",
+    77: "cp936",
+    78: "cp949",
+    79: "cp950",
+    80: "cp874",
+    87: "iso-8859-1",
+    88: "cp1252",
+    89: "cp1252",
+    100: "cp852",
+    101: "cp866",
+    102: "cp865",
+    103: "cp861",
+    106: "cp737",
+    107: "cp857",
+    108: "cp863",
+    120: "cp950",
+    121: "cp949",
+    122: "cp936",
+    123: "cp932",
+    124: "cp874",
+    134: "cp737",
+    135: "cp852",
+    136: "cp857",
+    150: "mac_cyrillic",
+    151: "mac_latin2",
+    200: "cp1250",
+    201: "cp1251",
+    202: "cp1254",
+    203: "cp1253",
+    204: "cp1257",
+}
 
 
 def _tool_error(error_type: str, error: str, **extra) -> str:
@@ -299,6 +376,142 @@ def _bbox_hash8(bbox: str, extra: str = "") -> str:
     return hashlib.sha1(f"{bbox}|{extra}".encode()).hexdigest()[:8]
 
 
+def _codec_or_none(name: str) -> str | None:
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        return None
+    return name
+
+
+def _cpg_encoding(label: str) -> str | None:
+    """Map a shapefile .cpg label to a Python codec.
+
+    Follows GDAL GetEncodingFromCPG (Esri code-page names):
+    https://github.com/OSGeo/gdal/blob/release/3.9/ogr/ogrsf_frmts/shape/ogrshapelayer.cpp
+    """
+    text = label.strip().strip("\x00").strip()
+    if not text or text.upper().startswith("LDID/"):
+        return None
+    upper = text.upper().replace(" ", "")
+    if upper in {"UTF-8", "UTF8"}:
+        return "utf-8"
+    if upper.startswith("8859"):
+        rest = text.strip()[4:]
+        if rest.startswith("-"):
+            rest = rest[1:]
+        return _codec_or_none(f"iso-8859-{rest}")
+    if upper.startswith("ISO-8859-") or upper.startswith("ISO8859-"):
+        digits = upper.split("-")[-1]
+        return _codec_or_none(f"iso-8859-{digits}")
+    if upper.startswith("WINDOWS-") or upper.startswith("CP"):
+        digits = upper.split("-")[-1]
+        if digits.startswith("CP"):
+            digits = digits[2:]
+        if digits.isdigit():
+            return _codec_or_none(f"cp{digits}")
+    if text.isdigit():
+        n = int(text)
+        if (437 <= n <= 950) or (1250 <= n <= 1258):
+            return _codec_or_none(f"cp{n}")
+    return _codec_or_none(text)
+
+
+def _shapefile_text_encoding(shp_file: Path) -> str:
+    """Encoding for DBF text. A sibling .cpg wins; otherwise DBF LDID."""
+    cpg_path = shp_file.with_suffix(".cpg")
+    if cpg_path.is_file():
+        codec = _cpg_encoding(cpg_path.read_bytes().decode("ascii", errors="replace"))
+        if codec:
+            return codec
+    dbf_path = shp_file.with_suffix(".dbf")
+    if dbf_path.is_file():
+        header = dbf_path.read_bytes()[:32]
+        if len(header) >= 30 and header[29]:
+            codec = _codec_or_none(_DBF_LDID_ENCODING.get(header[29], ""))
+            if codec:
+                return codec
+    return "utf-8"
+
+
+def _text_block(text: str) -> TextContent:
+    return TextContent(type="text", text=text)
+
+
+def _image_block(png: bytes) -> ImageContent:
+    return ImageContent(
+        type="image",
+        data=base64.b64encode(png).decode("ascii"),
+        mimeType="image/png",
+    )
+
+
+def _blob_block(filename: str, mime: str, data: bytes) -> EmbeddedResource:
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri=f"file:///{filename}",
+            mimeType=mime,
+            blob=base64.b64encode(data).decode("ascii"),
+        ),
+    )
+
+
+def _png_bytes(image: PILImage.Image) -> bytes:
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _select_attachments(
+    ranked: list[tuple[int, str, str, bytes]],
+    *,
+    slots: int,
+) -> tuple[list[tuple[int, str, str, bytes]], list[str]]:
+    """Keep the first `slots` files that fit under the size limit."""
+    kept: list[tuple[int, str, str, bytes]] = []
+    omitted: list[str] = []
+    for item in sorted(ranked, key=lambda row: row[0]):
+        _rank, name, _mime, data = item
+        if len(data) > _MAX_ATTACHMENT_BYTES:
+            omitted.append(f"{name} ({len(data)} bytes, over the 25 MB limit)")
+            continue
+        if len(kept) >= slots:
+            omitted.append(name)
+            continue
+        kept.append(item)
+    return kept, omitted
+
+
+def _attachment_block(name: str, mime: str, data: bytes) -> ImageContent | EmbeddedResource:
+    if mime == "image/png":
+        return _image_block(data)
+    return _blob_block(name, mime, data)
+
+
+def _burnt_area_blocks(
+    summary: dict,
+    geojson: dict | None,
+    filename: str,
+) -> list[TextContent | EmbeddedResource]:
+    blocks: list[TextContent | EmbeddedResource] = [
+        _text_block(json.dumps(summary, default=str)),
+    ]
+    if geojson is None:
+        return blocks
+    raw = json.dumps(geojson).encode("utf-8")
+    if len(raw) > _MAX_ATTACHMENT_BYTES:
+        blocks.append(
+            _text_block(
+                "The burnt-area polygons were too large to attach "
+                f"({len(raw)} bytes; limit is 25 MB). "
+                "Request a smaller bbox or a lower max_features."
+            )
+        )
+        return blocks
+    blocks.append(_blob_block(filename, "application/geo+json", raw))
+    return blocks
+
 
 def _read_burnt_areas_from_shapefile(
     shapefile_dir: str,
@@ -329,7 +542,7 @@ def _read_burnt_areas_from_shapefile(
     # Find the .shp file
     shp_files = list(shp_path.glob("*.shp"))
     if not shp_files:
-        raise FileNotFoundError(f"No .shp file found in {shapefile_dir}")
+        raise FileNotFoundError("No .shp file found in the shapefile directory")
 
     # Parse bbox if provided
     bbox_filter = None
@@ -338,7 +551,12 @@ def _read_burnt_areas_from_shapefile(
         if len(parts) == 4:
             bbox_filter = (parts[0], parts[1], parts[2], parts[3])  # W, S, E, N
 
-    sf = shapefile.Reader(str(shp_files[0]), encoding="utf-8", encodingErrors="replace")
+    text_encoding = _shapefile_text_encoding(shp_files[0])
+    sf = shapefile.Reader(
+        str(shp_files[0]),
+        encoding=text_encoding,
+        encodingErrors="replace",
+    )
     fields = [f[0] for f in sf.fields[1:]]  # skip DeletionFlag
     firedate_idx = fields.index("FIREDATE") if "FIREDATE" in fields else None
 
@@ -369,7 +587,7 @@ def _read_burnt_areas_from_shapefile(
             if hasattr(val, "isoformat"):
                 val = val.isoformat()
             elif isinstance(val, (bytes, bytearray)):
-                val = val.decode("utf-8", errors="replace")
+                val = val.decode(text_encoding, errors="replace")
             props[fname] = val
 
         # Read geometry
@@ -396,7 +614,7 @@ def _read_burnt_areas_from_shapefile(
     }
 
 
-def _gml_to_geojson(gml_text: str) -> dict:
+def _gml_to_geojson(gml_text: str | bytes) -> dict:
     """
     Convert MapServer GML2 response to a GeoJSON FeatureCollection.
 
@@ -405,6 +623,7 @@ def _gml_to_geojson(gml_text: str) -> dict:
     """
     import xml.etree.ElementTree as ET
 
+    # Bytes keep the XML declaration's encoding. A str is already decoded.
     root = ET.fromstring(gml_text)
     ns = {
         "gml": "http://www.opengis.net/gml",
@@ -631,22 +850,21 @@ async def geocode_place(
 # ===== Tool 1: EFFIS Burnt Areas (Copernicus) ==============================
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def get_effis_burnt_areas(
     bbox: str = "-18,27,42,72",
     max_features: int = 50,
     date: str | None = None,
     buffer_km: float = 5.0,
-    save_dir: str | None = None,
     shapefile_dir: str | None = None,
-) -> str:
+) -> list[TextContent | EmbeddedResource]:
     """
     Detect burnt areas from EFFIS and return per-fire bboxes + metadata.
 
-    Fetches burnt area polygons from EFFIS, saves the full GeoJSON to disk,
-    and returns a compact list of fires sorted by area (largest first).
-    Each fire entry includes a bbox string ready to pass directly to
-    compute_metrics or other downstream tools.
+    Fetches burnt area polygons from EFFIS and returns a compact list of
+    fires sorted by area (largest first), plus the GeoJSON polygons as an
+    attached file. Each fire entry includes a bbox string ready to pass
+    directly to compute_metrics or other downstream tools.
 
     Workflow:
         1. Call get_effis_burnt_areas(date=...) → fires with bboxes
@@ -673,15 +891,14 @@ async def get_effis_burnt_areas(
                         Applied with a WGS84 geodesic when computing per-fire
                         bounding boxes. A buffer that crosses ±180° is split
                         into two boxes.
-        save_dir:       Directory to save files. Defaults to ~/fire_maps/.
         shapefile_dir:  Path to local EFFIS shapefile directory (containing
                         modis.ba.poly.shp). Overrides EFFIS_SHAPEFILE_DIR env var.
                         Used for fast historical date queries.
 
     Returns:
-        JSON with a list of fires (bbox, area_ha, commune, country,
-        firedate), saved file paths, and WMS map image info. Fires that
-        cross the antimeridian also include ``bboxes`` and
+        A text summary of fires (bbox, area_ha, commune, country, firedate)
+        and, when it fits under 25 MB, the GeoJSON polygons as an embedded
+        file. Fires that cross the antimeridian also include ``bboxes`` and
         ``antimeridian_split``.
     """
 
@@ -732,6 +949,7 @@ async def get_effis_burnt_areas(
         "source": "EFFIS — Burnt Area Polygons",
         "date_filter": date_label,
     }
+    geojson: dict | None = None
 
     # Resolve shapefile path
     shp_dir = shapefile_dir or EFFIS_SHAPEFILE_DIR or None
@@ -748,7 +966,6 @@ async def get_effis_burnt_areas(
                 max_features=max_features,
             )
             result["data_source"] = "local_shapefile"
-            result["shapefile_dir"] = shp_dir
 
         elif use_sortby and date:
             # ── Paginated fetch for a specific date ──
@@ -802,7 +1019,7 @@ async def get_effis_burnt_areas(
                 logger.info("  Paginating: offset=%d batch=%d matched=%d", offset, batch_size, len(matched))
 
                 resp = await _http_get(EFFIS_OWS, params=wfs_params)
-                batch = _gml_to_geojson(resp.text)
+                batch = _gml_to_geojson(resp.content)
                 features = batch.get("features", [])
 
                 if not features:
@@ -868,20 +1085,11 @@ async def get_effis_burnt_areas(
                 "MAXFEATURES": str(max_features),
             }
             resp = await _http_get(EFFIS_OWS, params=wfs_params)
-            geojson = _gml_to_geojson(resp.text)
+            geojson = _gml_to_geojson(resp.content)
 
         features = geojson.get("features", [])
         n_features = len(features)
-
-        # Save full GeoJSON to file (keeps verbose polygon coordinates out
-        # of the tool response that the model sees).
-        out_dir = Path(save_dir) if save_dir else DEFAULT_SAVE_DIR
-        out_dir.mkdir(parents=True, exist_ok=True)
-        filepath = out_dir / f"burnt_areas_{date_label}_{_bbox_hash8(bbox, str(max_features))}.geojson"
-        filepath.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
-
         result["total_features"] = n_features
-        result["saved_geojson"] = str(filepath)
 
         # Extract per-fire bounding boxes with metadata (sorted by area,
         # largest first). Each bbox is ready to pass to compute_metrics.
@@ -929,7 +1137,10 @@ async def get_effis_burnt_areas(
     except Exception as exc:
         result["geojson_error"] = str(exc)
 
-    return json.dumps(result, default=str)
+    filename = (
+        f"burnt_areas_{date_label}_{_bbox_hash8(bbox, str(max_features))}.geojson"
+    )
+    return _burnt_area_blocks(result, geojson, filename)
 
 
 # ===== CDSE Authentication & Helpers ========================================
@@ -1306,15 +1517,13 @@ def _generate_metric_plots(
     post_fire: list[dict],
     metrics: list[str],
     fire_date: str,
-    save_dir: Path,
-) -> dict[str, str]:
-    """Generate time-series plots for each metric. Returns {metric: filepath}."""
+) -> dict[str, bytes]:
+    """Generate time-series plots for each metric. Returns {metric: png bytes}."""
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
 
     fire_dt = datetime.strptime(fire_date, "%Y-%m-%d")
-    save_dir.mkdir(parents=True, exist_ok=True)
-    plots: dict[str, str] = {}
+    plots: dict[str, bytes] = {}
 
     for metric_name in metrics:
         fig, ax = plt.subplots(figsize=(12, 5))
@@ -1372,13 +1581,13 @@ def _generate_metric_plots(
         ax.xaxis.set_major_locator(mdates.AutoDateLocator())
         fig.autofmt_xdate(rotation=30)
 
-        filepath = save_dir / f"{metric_name}_timeseries_{fire_date}.png"
+        buf = io.BytesIO()
         fig.savefig(
-            str(filepath), dpi=150, bbox_inches="tight",
+            buf, format="png", dpi=150, bbox_inches="tight",
             facecolor="white", edgecolor="none",
         )
         plt.close(fig)
-        plots[metric_name] = str(filepath)
+        plots[metric_name] = buf.getvalue()
 
     return plots
 
@@ -1791,15 +2000,12 @@ def build_recovery_table(
 def _generate_recovery_plot(
     recovery_df: Any,
     fire_date: str,
-    save_dir: Path,
-) -> str | None:
+) -> bytes | None:
     """Generate a two-panel recovery plot: raw NDVI and VRR (%)."""
     import matplotlib.pyplot as plt
 
     if recovery_df.empty:
         return None
-
-    save_dir.mkdir(parents=True, exist_ok=True)
 
     months: list[int] = []
     for label in recovery_df["Time step"]:
@@ -1833,10 +2039,10 @@ def _generate_recovery_plot(
     ax2.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    filepath = save_dir / f"recovery_{fire_date}.png"
-    fig.savefig(str(filepath), dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none")
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none")
     plt.close(fig)
-    return str(filepath)
+    return buf.getvalue()
 
 
 def _masked_statistics(
@@ -1915,7 +2121,7 @@ def _mask_coverage_fraction(obs: dict, metric_names: list[str]) -> float:
     return min(fractions) if fractions else 0.0
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def compute_metrics(
     bbox: str, fire_date: str,
     months_before: int = 3, months_after: int = 3,
@@ -1924,8 +2130,7 @@ async def compute_metrics(
     min_mask_coverage: float = 0.8, burn_threshold: float = BURN_THRESHOLD_DEFAULT,
     min_aoi_coverage: float = 0.5,
     recovery_months: list[int] | None = None,
-    save_dir: str | None = None,
-) -> str:
+) -> list[TextContent | ImageContent | EmbeddedResource]:
     """Compute spectral-index time series before and after a fire event,
     restricted to fire-affected pixels identified via a burn mask.
     Includes NDVI recovery analysis at the specified post-fire months.
@@ -1935,7 +2140,7 @@ async def compute_metrics(
         fire_date: Date of the fire event (YYYY-MM-DD).
         months_before: Months of data before the fire (default 3).
         months_after: Months of data after the fire (default 3). Also bounds the VRR disturbance (NDVI_1) median composite.
-        metrics: List of metrics: "ndvi", "nbr", "bais2", "regrowth" (default: all four). "regrowth" triggers NDVI recovery analysis and saves composite images.
+        metrics: List of metrics: "ndvi", "nbr", "bais2", "regrowth" (default: all four). "regrowth" triggers NDVI recovery analysis and attaches composite images.
         max_cloud_cover: Maximum cloud cover percentage 0-100 (default 20).
         resolution_m: Pixel resolution in metres on a local UTM grid (default 100). Set to 0 to use width/height.
         width: Image width in pixels when resolution_m is 0.
@@ -1944,7 +2149,6 @@ async def compute_metrics(
         min_aoi_coverage: Min fraction (0-1) of valid pixels across the *whole requested bbox* after SCL screening (default 0.5). This is the AOI-level cloud-rejection rule: applied first as a cheap pre-screen of catalog candidates (before any per-metric raster download), then again on the pre/post-fire composites used to build the burn mask and on each per-scene observation, independent of where the burn mask falls.
         burn_threshold: dNBR cutoff for the binary burn mask (default 0.10). Not a severity class.
         recovery_months: Months after fire for NDVI₂ / VRR (default [12,24,36,48]). Each date uses a ±1 month median composite. Future months are auto-skipped. Pass [] to skip. Only used when "regrowth" is in metrics.
-        save_dir: Directory to save results.
 
     Returns:
         Compact JSON. On success, ok is true. On domain failure, ok is false with
@@ -1962,37 +2166,37 @@ async def compute_metrics(
 
     cdse_cid, cdse_csec = _resolve_cdse_creds()
     if not cdse_cid or not cdse_csec:
-        return _tool_error(
+        return [_text_block(_tool_error(
             "cdse_auth",
             "CDSE credentials not set. Either send them as HTTP "
             "headers (X-CDSE-Client-Id / X-CDSE-Client-Secret) or "
             "set CDSE_CLIENT_ID / CDSE_CLIENT_SECRET env vars on the server.",
-        )
+        ))]
 
     try:
         parts = [float(x) for x in bbox.split(",")]
         assert len(parts) == 4
         west, south, east, north = parts
     except Exception:
-        return _tool_error("invalid_bbox", f"Invalid bbox: {bbox}")
+        return [_text_block(_tool_error("invalid_bbox", f"Invalid bbox: {bbox}"))]
 
     try:
         fire_dt = datetime.strptime(fire_date, "%Y-%m-%d")
     except ValueError:
-        return _tool_error(
+        return [_text_block(_tool_error(
             "invalid_fire_date",
             f"Invalid fire_date: {fire_date}. Expected YYYY-MM-DD.",
-        )
+        ))]
 
     if metrics is None:
         metrics = ["ndvi", "nbr", "bais2", "regrowth"]
     valid_metrics = {"ndvi", "nbr", "bais2", "regrowth"}
     for m in metrics:
         if m not in valid_metrics:
-            return _tool_error(
+            return [_text_block(_tool_error(
                 "unknown_metric",
                 f"Unknown metric '{m}'. Valid: {', '.join(sorted(valid_metrics))}",
-            )
+            ))]
     run_regrowth = "regrowth" in metrics
     scene_metrics = [m for m in metrics if m != "regrowth"]
 
@@ -2005,7 +2209,7 @@ async def compute_metrics(
     try:
         token = await _cdse_get_token(cdse_cid, cdse_csec)
     except Exception as exc:
-        return _tool_error("cdse_auth", f"CDSE authentication failed: {exc}")
+        return [_text_block(_tool_error("cdse_auth", f"CDSE authentication failed: {exc}"))]
     token_acquired = datetime.utcnow()
 
     async def _ensure_token() -> None:
@@ -2035,10 +2239,8 @@ async def compute_metrics(
         "images": {"pre_fire": [], "post_fire": []},
         "plots": {}, "summary": {},
     }
-
-    out_dir = Path(save_dir) if save_dir else Path(DEFAULT_SAVE_DIR)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    series_dir = out_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"
+    # rank, filename, mime, bytes. Packed into the tool result at the end.
+    files: list[tuple[int, str, str, bytes]] = []
 
     proc_bounds, proc_size, grid_meta = _process_grid(
         [west, south, east, north], resolution_m, width, height,
@@ -2169,11 +2371,16 @@ async def compute_metrics(
                 f"months_before/months_after window or a higher max_cloud_cover."
             )
 
-        series_dir.mkdir(parents=True, exist_ok=True)
         for label, comp in [("pre", pre_composite), ("post", post_composite)]:
             vis = np.nan_to_num(comp, nan=-1.0).astype(np.float64)
             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-            PILImage.fromarray(vis, mode="L").save(str(series_dir / f"composite_nbr_{label}.png"))
+            rank = 50 if label == "pre" else 51
+            files.append((
+                rank,
+                f"composite_nbr_{label}.png",
+                "image/png",
+                _png_bytes(PILImage.fromarray(vis, mode="L")),
+            ))
 
         if burn_threshold and burn_threshold > 0:
             burn_mask = _compute_burn_mask(pre_composite, post_composite, burn_threshold)
@@ -2184,8 +2391,12 @@ async def compute_metrics(
         n_total = int(burn_mask.size)
         logger.info("  Burn mask: %d/%d pixels (%.1f%%)", n_burned, n_total, 100.0 * n_burned / max(n_total, 1))
 
-        mask_path = series_dir / "burn_mask.png"
-        PILImage.fromarray((burn_mask.astype(np.uint8) * 255), mode="L").save(str(mask_path))
+        files.append((
+            11,
+            "burn_mask.png",
+            "image/png",
+            _png_bytes(PILImage.fromarray((burn_mask.astype(np.uint8) * 255), mode="L")),
+        ))
 
         result["burn_mask"] = {
             "metric": "dnbr",
@@ -2195,7 +2406,6 @@ async def compute_metrics(
             "threshold": burn_threshold,
             "aoi_coverage_pre": round(aoi_coverage_pre, 4),
             "aoi_coverage_post": round(aoi_coverage_post, 4),
-            "mask_path": str(mask_path),
         }
         if n_burned == 0:
             result["burn_mask"]["warning"] = (
@@ -2220,18 +2430,20 @@ async def compute_metrics(
     if burn_mask is not None and pre_composite is not None and post_composite is not None:
         try:
             severity_map = _compute_severity_map(pre_composite, post_composite)
-            sev_path = series_dir / "severity_map.png"
-            series_dir.mkdir(parents=True, exist_ok=True)
             sev_vis = np.zeros((*severity_map.shape, 3), dtype=np.uint8)
             sev_vis[severity_map == 1] = [255, 255, 0]
             sev_vis[severity_map == 2] = [255, 165, 0]
             sev_vis[severity_map == 3] = [255, 69, 0]
             sev_vis[severity_map == 4] = [139, 0, 0]
             sev_vis[severity_map == 5] = [128, 128, 128]  # no data, distinct from unburned (black)
-            PILImage.fromarray(sev_vis, mode="RGB").save(str(sev_path))
+            files.append((
+                10,
+                "severity_map.png",
+                "image/png",
+                _png_bytes(PILImage.fromarray(sev_vis, mode="RGB")),
+            ))
             sev_in_mask = severity_map[burn_mask]
             result["severity_map"] = {
-                "path": str(sev_path),
                 # burn_mask already excludes invalid pixels, so class 5
                 # never appears in sev_in_mask; reported separately below
                 # as a whole-AOI count, complementing aoi_coverage_pre/post.
@@ -2307,41 +2519,41 @@ async def compute_metrics(
                         recovery_df = build_recovery_table(
                             img_pre, img_dist_ndvi, imgs_post_recovery, burn_mask, _RECOVERY_BANDS, severity_map,
                         )
-                        recovery_dir = series_dir / "recovery"
-                        recovery_dir.mkdir(parents=True, exist_ok=True)
-
-                        def _save_ndvi_composite(img_2band, tag, out_dir):
+                        def _ndvi_png_from_bands(img_2band) -> bytes:
                             nir = img_2band[_RECOVERY_BANDS["nir"]].astype(np.float64)
                             red = img_2band[_RECOVERY_BANDS["red"]].astype(np.float64)
                             denom = nir + red
                             ndvi = np.where(np.abs(denom) > 1e-10, (nir - red) / denom, np.nan)
                             vis = np.nan_to_num(ndvi, nan=-1.0)
                             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-                            path = out_dir / f"composite_ndvi_{tag}.png"
-                            PILImage.fromarray(vis, mode="L").save(str(path))
-                            return str(path)
+                            return _png_bytes(PILImage.fromarray(vis, mode="L"))
 
-                        def _save_ndvi(ndvi, tag, out_dir):
+                        def _ndvi_png(ndvi) -> bytes:
                             vis = np.nan_to_num(ndvi.astype(np.float64), nan=-1.0)
                             vis = np.clip((vis + 1) / 2 * 255, 0, 255).astype(np.uint8)
-                            path = out_dir / f"composite_ndvi_{tag}.png"
-                            PILImage.fromarray(vis, mode="L").save(str(path))
-                            return str(path)
+                            return _png_bytes(PILImage.fromarray(vis, mode="L"))
 
-                        composite_paths = {}
-                        composite_paths["pre_fire"] = _save_ndvi_composite(img_pre, "pre_fire", recovery_dir)
-                        composite_paths["disturbance"] = _save_ndvi(img_dist_ndvi, "disturbance", recovery_dir)
-                        for ts_label, ts_img in imgs_post_recovery.items():
+                        files.append((52, "composite_ndvi_pre_fire.png", "image/png", _ndvi_png_from_bands(img_pre)))
+                        files.append((53, "composite_ndvi_disturbance.png", "image/png", _ndvi_png(img_dist_ndvi)))
+                        for i, (ts_label, ts_img) in enumerate(imgs_post_recovery.items()):
                             safe_tag = ts_label.replace("+", "plus_").replace(" ", "_")
-                            composite_paths[ts_label] = _save_ndvi_composite(ts_img, safe_tag, recovery_dir)
-                        csv_path = recovery_dir / f"recovery_{fire_date}.csv"
-                        recovery_df.to_csv(str(csv_path), index=False)
-                        recovery_plot = _generate_recovery_plot(recovery_df, fire_date, recovery_dir)
+                            files.append((
+                                60 + i,
+                                f"composite_ndvi_{safe_tag}.png",
+                                "image/png",
+                                _ndvi_png_from_bands(ts_img),
+                            ))
+                        files.append((
+                            30,
+                            f"recovery_{fire_date}.csv",
+                            "text/csv",
+                            recovery_df.to_csv(index=False).encode("utf-8"),
+                        ))
+                        recovery_plot = _generate_recovery_plot(recovery_df, fire_date)
+                        if recovery_plot:
+                            files.append((20, f"recovery_{fire_date}.png", "image/png", recovery_plot))
                         result["recovery"] = {
                             "table": recovery_df.to_dict(orient="records"),
-                            "csv_path": str(csv_path),
-                            "plot_path": recovery_plot,
-                            "composite_images": composite_paths,
                             "time_steps": list(imgs_post_recovery.keys()),
                         }
                         logger.info("  Recovery analysis complete: %d time steps", len(imgs_post_recovery))
@@ -2409,10 +2621,44 @@ async def compute_metrics(
         for phase, _, _ in phases:
             logger.info("  %s -> %d observations (masked stats)", phase, len(result[phase]))
 
-    # ── Download visualization images ──
+    # ── Time-series plots (attached only if a file slot remains) ──
+    try:
+        plot_pngs = _generate_metric_plots(
+            result["pre_fire"], result["post_fire"], scene_metrics, fire_date,
+        )
+        result["plots"] = list(plot_pngs)
+        for i, (metric_name, png) in enumerate(plot_pngs.items()):
+            files.append((
+                80 + i,
+                f"{metric_name}_timeseries_{fire_date}.png",
+                "image/png",
+                png,
+            ))
+    except Exception as exc:
+        result["plots"] = {"error": str(exc)}
+
+    # ── Per-scene images, only while a slot under the 10-file cap remains ──
     kept_dates = None
     if min_mask_coverage > 0 or min_aoi_coverage > 0:
         kept_dates = {obs["date"] for obs in result["pre_fire"] + result["post_fire"] if "date" in obs}
+
+    vis_candidates: list[tuple[str, str, str, Any]] = []
+    for phase, _, _ in phases:
+        for scene in phase_scenes.get(phase, []):
+            scene_date = scene.get("properties", {}).get("datetime", "")[:10]
+            if kept_dates is not None and scene_date not in kept_dates:
+                continue
+            cloud_cover = scene.get("properties", {}).get("eo:cloud_cover", -1)
+            for metric_name in scene_metrics:
+                vis_candidates.append((phase, scene_date, metric_name, cloud_cover))
+
+    kept_preview, _ = _select_attachments(files, slots=_MAX_ATTACHMENTS - 1)
+    vis_room = (_MAX_ATTACHMENTS - 1) - len(kept_preview)
+    vis_omitted_note = None
+    if len(vis_candidates) > vis_room:
+        vis_omitted_note = (
+            f"{len(vis_candidates) - vis_room} per-scene visualization images"
+        )
 
     async def _download_vis_one(phase, scene_date, metric_name, cloud_cover):
         vis_eval = _METRIC_VIS_EVALSCRIPTS.get(metric_name)
@@ -2422,8 +2668,6 @@ async def compute_metrics(
             "bounds": proc_bounds,
             "data": [{"type": "sentinel-2-l2a", "dataFilter": {"timeRange": {"from": f"{scene_date}T00:00:00Z", "to": f"{scene_date}T23:59:59Z"}, "maxCloudCoverage": max_cloud_cover, "mosaickingOrder": "leastCC"}}],
         }
-        phase_dir = series_dir / phase / metric_name
-        phase_dir.mkdir(parents=True, exist_ok=True)
         async with _sem:
             async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
                 resp = await client.post(
@@ -2433,33 +2677,36 @@ async def compute_metrics(
                 )
         if resp.status_code != 200:
             return None
-        filepath = phase_dir / f"{metric_name}_{scene_date}.png"
-        filepath.write_bytes(resp.content)
-        return {"phase": phase, "date": scene_date, "metric": metric_name, "cloud_cover_pct": cloud_cover, "path": str(filepath), "size_bytes": len(resp.content)}
+        return {
+            "phase": phase,
+            "date": scene_date,
+            "metric": metric_name,
+            "cloud_cover_pct": cloud_cover,
+            "png": resp.content,
+            "size_bytes": len(resp.content),
+        }
 
-    vis_tasks = []
-    for phase, _, _ in phases:
-        for scene in phase_scenes.get(phase, []):
-            scene_date = scene.get("properties", {}).get("datetime", "")[:10]
-            if kept_dates is not None and scene_date not in kept_dates:
-                continue
-            cloud_cover = scene.get("properties", {}).get("eo:cloud_cover", -1)
-            for metric_name in scene_metrics:
-                vis_tasks.append(_download_vis_one(phase, scene_date, metric_name, cloud_cover))
-
+    chosen_vis = vis_candidates[: max(vis_room, 0)]
     await _ensure_token()
+    vis_tasks = [_download_vis_one(*item) for item in chosen_vis]
     vis_results = await asyncio.gather(*vis_tasks, return_exceptions=True) if vis_tasks else []
-    for vr in vis_results:
-        if isinstance(vr, dict):
-            phase = vr.pop("phase")
-            result["images"][phase].append(vr)
-
-    # ── Generate time-series plots ──
-    try:
-        plot_dir = series_dir / "plots"
-        result["plots"] = _generate_metric_plots(result["pre_fire"], result["post_fire"], scene_metrics, fire_date, plot_dir)
-    except Exception as exc:
-        result["plots"] = {"error": str(exc)}
+    for i, vr in enumerate(vis_results):
+        if not isinstance(vr, dict):
+            continue
+        phase = vr["phase"]
+        png = vr["png"]
+        result["images"][phase].append({
+            "date": vr["date"],
+            "metric": vr["metric"],
+            "cloud_cover_pct": vr["cloud_cover_pct"],
+            "size_bytes": vr["size_bytes"],
+        })
+        files.append((
+            90 + i,
+            f"{vr['metric']}_{vr['date']}_{phase}.png",
+            "image/png",
+            png,
+        ))
 
     # ── Compute summary ──
     def _phase_means(phase_data, mn):
@@ -2513,15 +2760,34 @@ async def compute_metrics(
     if isinstance(result.get("recovery"), dict) and "error" not in result.get("recovery", {}):
         summary["recovery"] = {
             "time_steps": result["recovery"].get("time_steps", []),
-            "csv_path": result["recovery"].get("csv_path"),
-            "plot_path": result["recovery"].get("plot_path"),
-            "composite_images": result["recovery"].get("composite_images", {}),
         }
+
+    kept, omitted = _select_attachments(files, slots=_MAX_ATTACHMENTS - 1)
+    omitted_notes = list(omitted)
+    if vis_omitted_note:
+        omitted_notes.append(vis_omitted_note)
+    if omitted_notes:
+        summary["omitted_files"] = omitted_notes
+        summary["omitted_files_note"] = (
+            "Some files were not attached so this response stays within "
+            "10 files and 25 MB each: " + "; ".join(omitted_notes) + "."
+        )
     result["summary"] = summary
 
-    series_dir.mkdir(parents=True, exist_ok=True)
-    filepath = series_dir / f"metrics_{fire_date}.json"
-    filepath.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    json_name = f"metrics_{fire_date}.json"
+    json_bytes = json.dumps(result, indent=2, default=str).encode("utf-8")
+    attached = list(kept)
+    if len(json_bytes) > _MAX_ATTACHMENT_BYTES:
+        omitted_notes.append(f"{json_name} ({len(json_bytes)} bytes, over the 25 MB limit)")
+        summary["omitted_files"] = omitted_notes
+        summary["omitted_files_note"] = (
+            "Some files were not attached so this response stays within "
+            "10 files and 25 MB each: " + "; ".join(omitted_notes) + "."
+        )
+        result["summary"] = summary
+    else:
+        attached.append((40, json_name, "application/json", json_bytes))
+    attached.sort(key=lambda row: row[0])
 
     compact = {
         "ok": result.get("ok", True) and result.get("error_type") is None,
@@ -2531,7 +2797,6 @@ async def compute_metrics(
         "summary": summary, "plots": result.get("plots", {}),
         "images_pre_fire": len(result["images"]["pre_fire"]),
         "images_post_fire": len(result["images"]["post_fire"]),
-        "saved_json": str(filepath), "save_dir": str(series_dir),
     }
     if result.get("warnings"):
         compact["warnings"] = result["warnings"]
@@ -2542,12 +2807,14 @@ async def compute_metrics(
     if isinstance(result.get("recovery"), dict) and "error" not in result.get("recovery", {}):
         compact["recovery"] = {
             "time_steps": result["recovery"]["time_steps"],
-            "csv_path": result["recovery"].get("csv_path"),
-            "plot_path": result["recovery"].get("plot_path"),
-            "composite_images": result["recovery"].get("composite_images", {}),
             "table": result["recovery"].get("table"),
         }
-    return json.dumps(compact, default=str)
+    blocks: list[TextContent | ImageContent | EmbeddedResource] = [
+        _text_block(json.dumps(compact, default=str)),
+    ]
+    for _rank, name, mime, data in attached:
+        blocks.append(_attachment_block(name, mime, data))
+    return blocks
 
 # ---------------------------------------------------------------------------
 # Entry point
