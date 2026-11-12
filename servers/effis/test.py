@@ -340,6 +340,9 @@ def run_unit_tests():
     print(f"  antimeridian split: {split}")
     print("  [PASS] geodesic bbox helpers")
 
+    from test_return_files import run_return_file_tests
+    run_return_file_tests()
+
 
 # ---------------------------------------------------------------------------
 # Main
