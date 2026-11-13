@@ -22,9 +22,7 @@ from fastmcp import Client
 from PIL import Image
 
 SERVER_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SERVER_DIR.parents[1]
 sys.path.insert(0, str(SERVER_DIR))
-sys.path.insert(0, str(REPO_ROOT / "shared"))
 
 from eve_mcp_runtime.files import OutputFilesMiddleware  # noqa: E402
 

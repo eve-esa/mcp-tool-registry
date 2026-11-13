@@ -131,7 +131,6 @@ jobs:
           fi
           docker buildx build \
             --platform linux/amd64 \
-            --build-context eve_mcp_runtime=shared/eve_mcp_runtime \
             -f "$DOCKERFILE" \
             "servers/${{ matrix.server }}"
 

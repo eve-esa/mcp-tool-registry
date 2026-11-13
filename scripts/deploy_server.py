@@ -116,17 +116,12 @@ def build_and_push_image(
 
     dockerfile, build_context = _resolve_dockerfile(server_name)
     print(f"  Building image for {server_name} (linux/arm64)...")
-    # eve_mcp_runtime is outside the server directory. A Dockerfile can copy it
-    # with COPY --from=eve_mcp_runtime. See docker buildx build --build-context:
-    # https://docs.docker.com/reference/cli/docker/buildx/build/#build-context
     build_cmd = [
         "docker",
         "buildx",
         "build",
         "--platform",
         "linux/arm64",
-        "--build-context",
-        "eve_mcp_runtime=shared/eve_mcp_runtime",
         "-f",
         dockerfile,
         "-t",

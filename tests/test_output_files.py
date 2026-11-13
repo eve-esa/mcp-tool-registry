@@ -12,7 +12,7 @@ from fastmcp import Client, FastMCP
 from mcp.types import EmbeddedResource, ImageContent, ResourceLink, TextContent
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "shared"))
+sys.path.insert(0, str(REPO_ROOT / "servers" / "effis"))
 
 from eve_mcp_runtime.files import OutputFilesMiddleware  # noqa: E402
 
