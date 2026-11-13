@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: CEDA CCI OpenSearch MCP Server
+abstract: >-
+  MCP server for searching and subsetting CEDA CCI datasets. It finds Climate
+  Change Initiative datasets for an essential climate variable, selects
+  OPeNDAP files by date, and returns a point or bounding-box subset as JSON
+  records.
+authors:
+  - given-names: Gianluca
+    family-names: Squarcia
+    alias: gianlucasquarcia
+  - given-names: Davide
+    family-names: Poveromo
+    alias: podak
+keywords:
+  - mcp
+  - earth-observation
+  - ceda
+  - cci
+  - opensearch
+  - opendap
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/ceda-opensearch
