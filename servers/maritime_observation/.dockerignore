@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.cache/
+.ruff_cache/
+.venv/
+venv/
+outputs/
+artifacts/
+*.parquet
+# The registry generates .env in the build context to inject deployment secrets.
+# Keep that file available to COPY; never commit it to Git.
