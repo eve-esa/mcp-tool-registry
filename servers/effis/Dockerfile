@@ -13,6 +13,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+# Named context from scripts/deploy_server.py:
+#   docker buildx build --build-context eve_mcp_runtime=shared/eve_mcp_runtime
+# https://docs.docker.com/reference/cli/docker/buildx/build/#build-context
+COPY --from=eve_mcp_runtime . /app/eve_mcp_runtime
 
 # ~200 MiB compressed from EFFIS WFS; allow up to 30 min on slow links / emulated ARM builds.
 # Prefer verified HTTPS. The wildcard cert (*.effis.emergency.copernicus.eu,
@@ -36,4 +40,6 @@ RUN mkdir -p effis_layer \
 
 EXPOSE 8000
 
-CMD ["python", "server.py"]
+ENV PYTHONPATH=/app
+
+CMD ["python", "-m", "eve_mcp_runtime", "server.py"]

@@ -14,23 +14,23 @@ Tools:
     compute_metrics         — burn-masked NDVI, NBR, BAIS2 series and VRR
 
 Usage:
-    python server.py                              # stdio transport
-    python server.py --transport http --port 8000  # HTTP transport
+    python -m eve_mcp_runtime server.py           # HTTP, with file attachment
+    python server.py --transport http --port 8000  # HTTP without the launcher
 
 Requirements:
-    pip install "mcp[cli]>=1.2.0" httpx pyshp python-dotenv
+    pip install fastmcp==4.1.8 httpx pyshp python-dotenv
 
 Environment (optional ``effis/.env`` — loaded automatically):
     CDSE_CLIENT_ID, CDSE_CLIENT_SECRET — Copernicus Data Space / Sentinel Hub OAuth
     EFFIS_SHAPEFILE_DIR — path to local EFFIS ``modis.ba.poly`` shapefile directory
-    EFFIS_SAVE_DIR — local use only: write output files here and return their
-        paths instead of embedding the bytes in the tool result
+    EFFIS_SAVE_DIR — directory for output files. The default is a folder named
+        effis under the system temp dir. The platform attaches each file whose
+        absolute path appears in the tool result.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import codecs
 import hashlib
 import io
@@ -40,6 +40,7 @@ import math
 import os
 import re as _re
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -50,8 +51,9 @@ import numpy as np
 import pandas as pd
 import tifffile
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
-from mcp.types import BlobResourceContents, EmbeddedResource, ImageContent, TextContent
+from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_headers
+from mcp.types import TextContent
 from PIL import Image as PILImage
 
 # Headless server: select Agg before any pyplot import (matplotlib.use docs).
@@ -114,7 +116,7 @@ logger = logging.getLogger("fire-mcp")
 # MCP Server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("Fire Detection Server", host="0.0.0.0", port=8000, stateless_http=True)
+mcp = FastMCP("Fire Detection Server")
 
 
 # ---------------------------------------------------------------------------
@@ -131,15 +133,12 @@ mcp = FastMCP("Fire Detection Server", host="0.0.0.0", port=8000, stateless_http
 
 
 def _get_request_headers() -> dict[str, str]:
-    """Return HTTP headers from the current MCP request, or {} on stdio."""
-    try:
-        ctx = mcp.get_context()
-        request = ctx.request_context.request
-        if request is not None and hasattr(request, "headers"):
-            return dict(request.headers)
-    except Exception:
-        pass
-    return {}
+    """Return HTTP headers from the current MCP request, or {} on stdio.
+
+    Names are lowercase. ``include_all`` keeps every header, including ones
+    FastMCP hides by default. This function never raises.
+    """
+    return get_http_headers(include_all=True)
 
 
 def _resolve_cdse_creds() -> tuple[str, str]:
@@ -180,36 +179,21 @@ def _add_months(dt: datetime, months: int) -> datetime:
     return dt.replace(year=year, month=month, day=day)
 
 
-# The EVE backend stores ImageContent and BlobResourceContents from the tool
-# result and skips files past ARTIFACT_MAX_BYTES / ARTIFACT_MAX_PER_TOOL_CALL
-# (defaults 25 MB and 10). These caps are twice those defaults, so EVE keeps
-# the extra files only where its deployment raises both. The MCP spec sets no
-# cap on content blocks or their size.
-_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
-_MAX_ATTACHMENTS = 20
+# Per-scene visualization downloads stop here. The launcher attaches at most
+# MCP_MAX_ATTACHMENTS files (default 20) and names anything past that.
+_MAX_VIS_IMAGES = 99
 
 
-def _size_limit_text() -> str:
-    mib, rest = divmod(_MAX_ATTACHMENT_BYTES, 1024 * 1024)
-    return f"{mib} MB" if mib and not rest else f"{_MAX_ATTACHMENT_BYTES} bytes"
+def _output_dir() -> Path:
+    """Directory for files named in the tool result.
 
-
-def _omitted_files_note(omitted: list[str]) -> str:
-    return (
-        "Some files were not attached so this response stays within "
-        f"{_MAX_ATTACHMENTS} files and {_size_limit_text()} each: "
-        + "; ".join(omitted) + "."
-    )
-
-
-def _local_save_dir() -> Path | None:
-    """EFFIS_SAVE_DIR set: write files there and return paths, not bytes.
-
-    Only for a server that shares a filesystem with its client. A remote
-    client cannot open the returned paths.
+    The platform reads those absolute paths and attaches the files.
+    EFFIS_SAVE_DIR overrides the default, a folder under the system temp dir.
     """
     raw = os.getenv("EFFIS_SAVE_DIR", "").strip()
-    return Path(raw).expanduser().resolve() if raw else None
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path(tempfile.gettempdir()) / "effis"
 
 # DBF language-driver ID (header byte 29) -> Python codec.
 # GDAL GetEncodingFromLDIDNumber, LDID 87 is ISO-8859-1 (not CP1252):
@@ -465,55 +449,10 @@ def _text_block(text: str) -> TextContent:
     return TextContent(type="text", text=text)
 
 
-def _image_block(png: bytes) -> ImageContent:
-    return ImageContent(
-        type="image",
-        data=base64.b64encode(png).decode("ascii"),
-        mimeType="image/png",
-    )
-
-
-def _blob_block(filename: str, mime: str, data: bytes) -> EmbeddedResource:
-    return EmbeddedResource(
-        type="resource",
-        resource=BlobResourceContents(
-            uri=f"file:///{filename}",
-            mimeType=mime,
-            blob=base64.b64encode(data).decode("ascii"),
-        ),
-    )
-
-
 def _png_bytes(image: PILImage.Image) -> bytes:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return buf.getvalue()
-
-
-def _select_attachments(
-    ranked: list[tuple[int, str, str, bytes]],
-    *,
-    slots: int,
-) -> tuple[list[tuple[int, str, str, bytes]], list[str]]:
-    """Keep the first `slots` files that fit under the size limit."""
-    kept: list[tuple[int, str, str, bytes]] = []
-    omitted: list[str] = []
-    for item in sorted(ranked, key=lambda row: row[0]):
-        _rank, name, _mime, data = item
-        if len(data) > _MAX_ATTACHMENT_BYTES:
-            omitted.append(f"{name} ({len(data)} bytes, over the {_size_limit_text()} limit)")
-            continue
-        if len(kept) >= slots:
-            omitted.append(name)
-            continue
-        kept.append(item)
-    return kept, omitted
-
-
-def _attachment_block(name: str, mime: str, data: bytes) -> ImageContent | EmbeddedResource:
-    if mime == "image/png":
-        return _image_block(data)
-    return _blob_block(name, mime, data)
 
 
 def _save_files(out_dir: Path, files: list[tuple[int, str, str, bytes]]) -> list[dict]:
@@ -530,29 +469,12 @@ def _burnt_area_blocks(
     summary: dict,
     geojson: dict | None,
     filename: str,
-) -> list[TextContent | EmbeddedResource]:
-    local_dir = _local_save_dir()
-    if geojson is not None and local_dir is not None:
+) -> list[TextContent]:
+    if geojson is not None:
         raw = json.dumps(geojson).encode("utf-8")
-        saved = _save_files(local_dir, [(0, filename, "application/geo+json", raw)])
+        saved = _save_files(_output_dir(), [(0, filename, "application/geo+json", raw)])
         summary["geojson_path"] = saved[0]["path"]
-    blocks: list[TextContent | EmbeddedResource] = [
-        _text_block(json.dumps(summary, default=str)),
-    ]
-    if geojson is None or local_dir is not None:
-        return blocks
-    raw = json.dumps(geojson).encode("utf-8")
-    if len(raw) > _MAX_ATTACHMENT_BYTES:
-        blocks.append(
-            _text_block(
-                "The burnt-area polygons were too large to attach "
-                f"({len(raw)} bytes; limit is {_size_limit_text()}). "
-                "Request a smaller bbox or a lower max_features."
-            )
-        )
-        return blocks
-    blocks.append(_blob_block(filename, "application/geo+json", raw))
-    return blocks
+    return [_text_block(json.dumps(summary, default=str))]
 
 
 def _read_burnt_areas_from_shapefile(
@@ -892,14 +814,14 @@ async def geocode_place(
 # ===== Tool 1: EFFIS Burnt Areas (Copernicus) ==============================
 
 
-@mcp.tool(structured_output=False)
+@mcp.tool(output_schema=None)
 async def get_effis_burnt_areas(
     bbox: str = "-18,27,42,72",
     max_features: int = 50,
     date: str | None = None,
     buffer_km: float = 5.0,
     shapefile_dir: str | None = None,
-) -> list[TextContent | EmbeddedResource]:
+) -> list[TextContent]:
     """
     Detect burnt areas from EFFIS and return per-fire bboxes + metadata.
 
@@ -938,11 +860,11 @@ async def get_effis_burnt_areas(
                         Used for fast historical date queries.
 
     Returns:
-        A text summary of fires (bbox, area_ha, commune, country, firedate)
-        and, when it fits under 50 MB, the GeoJSON polygons as an embedded
-        file. With EFFIS_SAVE_DIR set, the GeoJSON is written there instead
-        and the summary gives its path in ``geojson_path``. Fires that cross
-        the antimeridian also include ``bboxes`` and ``antimeridian_split``.
+        A text summary of fires (bbox, area_ha, commune, country, firedate).
+        When polygons are available, they are written as GeoJSON and the
+        summary gives that absolute path in ``geojson_path``. The platform
+        attaches the file. Fires that cross the antimeridian also include
+        ``bboxes`` and ``antimeridian_split``.
     """
 
     # Resolve date shortcuts and build WFS params
@@ -2164,7 +2086,7 @@ def _mask_coverage_fraction(obs: dict, metric_names: list[str]) -> float:
     return min(fractions) if fractions else 0.0
 
 
-@mcp.tool(structured_output=False)
+@mcp.tool(output_schema=None)
 async def compute_metrics(
     bbox: str, fire_date: str,
     months_before: int = 3, months_after: int = 3,
@@ -2173,7 +2095,7 @@ async def compute_metrics(
     min_mask_coverage: float = 0.8, burn_threshold: float = BURN_THRESHOLD_DEFAULT,
     min_aoi_coverage: float = 0.5,
     recovery_months: list[int] | None = None,
-) -> list[TextContent | ImageContent | EmbeddedResource]:
+) -> list[TextContent]:
     """Compute spectral-index time series before and after a fire event,
     restricted to fire-affected pixels identified via a burn mask.
     Includes NDVI recovery analysis at the specified post-fire months.
@@ -2202,9 +2124,9 @@ async def compute_metrics(
         had zero usable scenes after catalog search/AOI screening, so that
         phase's observations and images are empty while the other phase and
         the burn mask may still be fine. Surface these warnings to the user.
-        Plots, the recovery CSV and the full metrics JSON follow as attached
-        files (at most 20). With EFFIS_SAVE_DIR set, every file is written
-        there instead and listed with its path under "files".
+        Plots, the recovery CSV, the full metrics JSON, and at most 99
+        per-scene visualization images are written as files. Their absolute
+        paths are listed under "files". The platform attaches those files.
     """
 
     if recovery_months is None:
@@ -2683,7 +2605,7 @@ async def compute_metrics(
     except Exception as exc:
         result["plots"] = {"error": str(exc)}
 
-    # ── Per-scene images, only while a slot under the 10-file cap remains ──
+    # ── Per-scene images. Stop at _MAX_VIS_IMAGES. The launcher applies its own cap. ──
     kept_dates = None
     if min_mask_coverage > 0 or min_aoi_coverage > 0:
         kept_dates = {obs["date"] for obs in result["pre_fire"] + result["post_fire"] if "date" in obs}
@@ -2698,12 +2620,7 @@ async def compute_metrics(
             for metric_name in scene_metrics:
                 vis_candidates.append((phase, scene_date, metric_name, cloud_cover))
 
-    local_dir = _local_save_dir()
-    if local_dir is not None:
-        vis_room = len(vis_candidates)
-    else:
-        kept_preview, _ = _select_attachments(files, slots=_MAX_ATTACHMENTS - 1)
-        vis_room = (_MAX_ATTACHMENTS - 1) - len(kept_preview)
+    vis_room = _MAX_VIS_IMAGES
     vis_omitted_note = None
     if len(vis_candidates) > vis_room:
         vis_omitted_note = (
@@ -2812,28 +2729,14 @@ async def compute_metrics(
             "time_steps": result["recovery"].get("time_steps", []),
         }
 
-    if local_dir is not None:
-        kept, omitted = list(files), []
-    else:
-        kept, omitted = _select_attachments(files, slots=_MAX_ATTACHMENTS - 1)
-    omitted_notes = list(omitted)
     if vis_omitted_note:
-        omitted_notes.append(vis_omitted_note)
-    if omitted_notes:
-        summary["omitted_files"] = omitted_notes
-        summary["omitted_files_note"] = _omitted_files_note(omitted_notes)
+        summary["omitted_files"] = [vis_omitted_note]
     result["summary"] = summary
 
     json_name = f"metrics_{fire_date}.json"
     json_bytes = json.dumps(result, indent=2, default=str).encode("utf-8")
-    attached = list(kept)
-    if local_dir is None and len(json_bytes) > _MAX_ATTACHMENT_BYTES:
-        omitted_notes.append(f"{json_name} ({len(json_bytes)} bytes, over the {_size_limit_text()} limit)")
-        summary["omitted_files"] = omitted_notes
-        summary["omitted_files_note"] = _omitted_files_note(omitted_notes)
-        result["summary"] = summary
-    else:
-        attached.append((40, json_name, "application/json", json_bytes))
+    attached = list(files)
+    attached.append((40, json_name, "application/json", json_bytes))
     attached.sort(key=lambda row: row[0])
 
     compact = {
@@ -2856,16 +2759,9 @@ async def compute_metrics(
             "time_steps": result["recovery"]["time_steps"],
             "table": result["recovery"].get("table"),
         }
-    if local_dir is not None:
-        out_dir = local_dir / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"
-        compact["files"] = _save_files(out_dir, attached)
-        return [_text_block(json.dumps(compact, default=str))]
-    blocks: list[TextContent | ImageContent | EmbeddedResource] = [
-        _text_block(json.dumps(compact, default=str)),
-    ]
-    for _rank, name, mime, data in attached:
-        blocks.append(_attachment_block(name, mime, data))
-    return blocks
+    out_dir = _output_dir() / f"metrics_{fire_date}_{_bbox_hash8(bbox)}"
+    compact["files"] = _save_files(out_dir, attached)
+    return [_text_block(json.dumps(compact, default=str))]
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -2884,9 +2780,14 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000, help="Port for HTTP transport")
     args = parser.parse_args()
 
-    mcp.settings.port = args.port
-
     if args.transport == "stdio":
         mcp.run(transport="stdio")
     else:
-        mcp.run(transport="streamable-http")
+        # port=8000 is the AgentCore contract. --port still overrides it.
+        mcp.run(
+            transport="streamable-http",
+            host="0.0.0.0",
+            port=8000 if args.port == 8000 else args.port,
+            path="/mcp",
+            stateless_http=True,
+        )
