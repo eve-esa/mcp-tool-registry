@@ -36,4 +36,6 @@ RUN mkdir -p effis_layer \
 
 EXPOSE 8000
 
-CMD ["python", "server.py"]
+ENV PYTHONPATH=/app
+
+CMD ["python", "-m", "eve_mcp_runtime", "server.py"]

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Offline tests: tool results carry file bytes, not server filesystem paths.
+"""Offline tests: tools write files and name their absolute paths.
 
 No network. Shapefile and GML fixtures are built in a temp directory.
-compute_metrics downloads are replaced with tiny arrays.
+compute_metrics downloads are replaced with tiny arrays. A second set of
+checks runs the same tools through OutputFilesMiddleware.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
-import re
+import os
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -18,49 +18,15 @@ from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import shapefile
+from fastmcp import Client
 from PIL import Image
 
 SERVER_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SERVER_DIR))
 
+from eve_mcp_runtime.files import OutputFilesMiddleware  # noqa: E402
+
 import server  # noqa: E402
-
-_ABS_PATH = re.compile(
-    r"/tmp(?:/|\b)|/var/|/Users/|/home/|/private/|[A-Za-z]:\\|"
-    r"saved_geojson|saved_json|shapefile_dir|\bsave_dir\b"
-)
-_PATH_KEYS = {
-    "path",
-    "save_dir",
-    "saved_json",
-    "saved_geojson",
-    "shapefile_dir",
-    "mask_path",
-    "composite_images",
-}
-
-
-def _walk_no_paths(value, where: str) -> None:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            assert not str(key).endswith("_path"), f"{where} key {key}"
-            assert key not in _PATH_KEYS, f"{where} key {key}"
-            _walk_no_paths(item, f"{where}.{key}")
-    elif isinstance(value, list):
-        for i, item in enumerate(value):
-            _walk_no_paths(item, f"{where}[{i}]")
-    elif isinstance(value, str):
-        assert _ABS_PATH.search(value) is None, f"{where}: {value[:180]}"
-
-
-def _assert_text_has_no_paths(blocks) -> None:
-    for i, block in enumerate(blocks):
-        if getattr(block, "type", None) != "text":
-            continue
-        assert _ABS_PATH.search(block.text) is None, block.text[:300]
-        stripped = block.text.lstrip()
-        if stripped.startswith("{") or stripped.startswith("["):
-            _walk_no_paths(json.loads(block.text), f"text[{i}]")
 
 
 def _write_fire_shapefile(directory: Path, commune: str, encoding: str) -> Path:
@@ -90,12 +56,8 @@ def _set_ldid(shp_path: Path, ldid: int) -> None:
     dbf_path.write_bytes(raw)
 
 
-def _file_blocks(blocks) -> list:
-    return [block for block in blocks if block.type in {"image", "resource"}]
-
-
-def _decode_blob(block) -> bytes:
-    return base64.b64decode(block.resource.blob)
+def _save_env(tmp: Path) -> dict[str, str]:
+    return {"EFFIS_SAVE_DIR": str(tmp / "out")}
 
 
 async def _burnt_areas(tmp: Path, **kwargs):
@@ -108,58 +70,58 @@ async def _burnt_areas(tmp: Path, **kwargs):
     )
 
 
-def test_shapefile_ldid_and_geojson_blob(tmp: Path) -> None:
-    shp = _write_fire_shapefile(tmp / "ldid", "Avinyó", "latin-1")
+def _summary(blocks) -> dict:
+    assert blocks[0].type == "text"
+    assert len(blocks) == 1
+    return json.loads(blocks[0].text)
+
+
+def _geojson(summary: dict) -> dict:
+    path = Path(summary["geojson_path"])
+    assert path.is_file()
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_shapefile_ldid_writes_geojson(tmp_path: Path) -> None:
+    shp = _write_fire_shapefile(tmp_path / "ldid", "Avinyó", "latin-1")
     _set_ldid(shp, 0x57)
-    blocks = asyncio.run(_burnt_areas(tmp / "ldid"))
+    with patch.dict(os.environ, _save_env(tmp_path)):
+        blocks = asyncio.run(_burnt_areas(tmp_path / "ldid"))
 
-    tool = server.mcp._tool_manager.get_tool("get_effis_burnt_areas")
-    assert tool.fn_metadata.output_schema is None
-    converted = tool.fn_metadata.convert_result(blocks)
-    assert not isinstance(converted, tuple)
-    assert [item.type for item in converted] == [item.type for item in blocks]
-    assert converted[0].type == "text"
-    assert converted[1].type == "resource"
-
-    summary = json.loads(blocks[0].text)
+    summary = _summary(blocks)
     assert summary["fires"][0]["commune"] == "Avinyó"
     assert summary["total_features"] == 1
-    _assert_text_has_no_paths(blocks)
-
-    blob = blocks[1]
-    assert blob.resource.mimeType == "application/geo+json"
-    uri = str(blob.resource.uri)
-    filename = uri.rsplit("/", 1)[-1]
-    assert uri.startswith("file:///burnt_areas_2024-08-01_")
-    assert filename.endswith(".geojson")
-    geojson = json.loads(_decode_blob(blob))
+    geojson = _geojson(summary)
     assert geojson["type"] == "FeatureCollection"
     assert geojson["features"][0]["properties"]["COMMUNE"] == "Avinyó"
-    print("  [PASS] shapefile LDID 0x57 keeps Avinyó and returns a GeoJSON blob")
+    assert Path(summary["geojson_path"]).name.startswith("burnt_areas_2024-08-01_")
+    print("  [PASS] shapefile LDID 0x57 keeps Avinyó and writes GeoJSON")
 
 
-def test_cpg_greek_and_literal_question_marks(tmp: Path) -> None:
-    greek_dir = tmp / "cpg"
+def test_cpg_greek_and_literal_question_marks(tmp_path: Path) -> None:
+    greek_dir = tmp_path / "cpg"
     shp = _write_fire_shapefile(greek_dir, "Στύρα", "cp1253")
     shp.with_suffix(".cpg").write_text("windows-1253", encoding="ascii")
-    blocks = asyncio.run(_burnt_areas(greek_dir))
-    summary = json.loads(blocks[0].text)
+    with patch.dict(os.environ, _save_env(tmp_path)):
+        blocks = asyncio.run(_burnt_areas(greek_dir))
+    summary = _summary(blocks)
     assert summary["fires"][0]["commune"] == "Στύρα"
-    geojson = json.loads(_decode_blob(blocks[1]))
+    geojson = _geojson(summary)
     assert geojson["features"][0]["properties"]["COMMUNE"] == "Στύρα"
 
-    q_dir = tmp / "questions"
+    q_dir = tmp_path / "questions"
     q_shp = _write_fire_shapefile(q_dir, "??????", "ascii")
     _set_ldid(q_shp, 0x57)
     raw = q_shp.with_suffix(".dbf").read_bytes()
     assert b"?" in raw
-    q_blocks = asyncio.run(_burnt_areas(q_dir))
-    q_summary = json.loads(q_blocks[0].text)
+    with patch.dict(os.environ, _save_env(tmp_path)):
+        q_blocks = asyncio.run(_burnt_areas(q_dir))
+    q_summary = _summary(q_blocks)
     assert q_summary["fires"][0]["commune"].startswith("??????")
     print("  [PASS] .cpg windows-1253 restores Greek; literal '?' stays '?'")
 
 
-def test_gml_utf8_greek(tmp: Path) -> None:
+def test_gml_utf8_greek(tmp_path: Path) -> None:
     gml = """<?xml version="1.0" encoding="UTF-8"?>
 <wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs"
     xmlns:gml="http://www.opengis.net/gml"
@@ -187,7 +149,10 @@ def test_gml_utf8_greek(tmp: Path) -> None:
         content = gml
 
     async def _call():
-        with patch.object(server, "_http_get", new=AsyncMock(return_value=_Response())):
+        with (
+            patch.dict(os.environ, _save_env(tmp_path)),
+            patch.object(server, "_http_get", new=AsyncMock(return_value=_Response())),
+        ):
             return await server.get_effis_burnt_areas(
                 bbox="23.0,37.5,24.0,38.5",
                 max_features=1,
@@ -195,34 +160,12 @@ def test_gml_utf8_greek(tmp: Path) -> None:
             )
 
     blocks = asyncio.run(_call())
-    summary = json.loads(blocks[0].text)
+    summary = _summary(blocks)
     assert summary["fires"][0]["commune"] == "Τοπική Κοινότητα Στύρων"
     assert summary["fires"][0]["country"] == "EL"
-    _assert_text_has_no_paths(blocks)
+    geojson = _geojson(summary)
+    assert geojson["features"][0]["properties"]["COMMUNE"] == "Τοπική Κοινότητα Στύρων"
     print("  [PASS] WFS GML UTF-8 keeps Greek commune names")
-
-
-def test_geojson_over_size_limit(tmp: Path) -> None:
-    shp = _write_fire_shapefile(tmp / "big", "Avinyó", "latin-1")
-    _set_ldid(shp, 0x57)
-    original = server._MAX_ATTACHMENT_BYTES
-    server._MAX_ATTACHMENT_BYTES = 40
-    try:
-        blocks = asyncio.run(_burnt_areas(tmp / "big"))
-    finally:
-        server._MAX_ATTACHMENT_BYTES = original
-
-    assert blocks[0].type == "text"
-    assert blocks[1].type == "text"
-    assert "too large to attach" in blocks[1].text
-    assert "limit is 40 bytes" in blocks[1].text
-    assert "bbox" in blocks[1].text
-    assert "max_features" in blocks[1].text
-    assert all(block.type != "resource" for block in blocks)
-    summary = json.loads(blocks[0].text)
-    assert summary["fires"]
-    _assert_text_has_no_paths(blocks)
-    print("  [PASS] GeoJSON over the size limit is a note, not a blob")
 
 
 def _fake_composite(token, bounds, size, time_from, time_to, max_cloud, metric):
@@ -266,134 +209,109 @@ async def _compute(**overrides):
         return await server.compute_metrics(**args)
 
 
-def test_default_limits_attach_whole_run() -> None:
-    assert server._MAX_ATTACHMENTS == 20
-    assert server._MAX_ATTACHMENT_BYTES == 50 * 1024 * 1024
-    assert server._size_limit_text() == "50 MB"
-    blocks = asyncio.run(_compute())
-    summary = json.loads(blocks[0].text)
-    assert "omitted_files" not in summary["summary"]
-    names = [str(b.resource.uri).rsplit("/", 1)[-1] for b in blocks if b.type == "resource"]
-    assert names == ["recovery_2020-06-01.csv", "metrics_2020-06-01.json"]
-    files = _file_blocks(blocks)
-    assert 10 < len(files) <= server._MAX_ATTACHMENTS
-    print(f"  [PASS] default 20-file / 50 MB caps attach all {len(files)} files")
-
-
-def test_compute_metrics_file_cap_and_types() -> None:
-    with patch.object(server, "_MAX_ATTACHMENTS", 10):
+def test_compute_metrics_writes_named_files(tmp_path: Path) -> None:
+    with patch.dict(os.environ, _save_env(tmp_path)):
         blocks = asyncio.run(_compute())
-    tool = server.mcp._tool_manager.get_tool("compute_metrics")
-    assert tool.fn_metadata.output_schema is None
-    converted = tool.fn_metadata.convert_result(blocks)
-    assert not isinstance(converted, tuple)
-    assert [item.type for item in converted] == [item.type for item in blocks]
-
-    assert blocks[0].type == "text"
-    summary = json.loads(blocks[0].text)
-    _assert_text_has_no_paths(blocks)
-    note = summary["summary"]["omitted_files_note"]
-    assert "10 files" in note
-    assert "composite_ndvi_Tplus_24mo.png" in note
-
-    files = _file_blocks(blocks)
-    assert len(files) == 10
-
-    severity = Image.open(BytesIO(base64.b64decode(blocks[1].data)))
-    burn = Image.open(BytesIO(base64.b64decode(blocks[2].data)))
-    assert blocks[1].mimeType == "image/png"
-    assert severity.getpixel((0, 0)) == (139, 0, 0)
-    assert burn.getpixel((0, 0)) == 255
-    assert blocks[3].type == "image"
-
-    resources = [block for block in blocks if block.type == "resource"]
-    assert resources[0].resource.mimeType == "text/csv"
-    assert str(resources[0].resource.uri).endswith("recovery_2020-06-01.csv")
-    csv_text = _decode_blob(resources[0]).decode("utf-8")
-    assert "VRR (%)" in csv_text.splitlines()[0]
-
-    assert resources[1].resource.mimeType == "application/json"
-    assert str(resources[1].resource.uri).endswith("metrics_2020-06-01.json")
-    metrics_doc = json.loads(_decode_blob(resources[1]))
-    assert metrics_doc["fire_date"] == "2020-06-01"
-    _walk_no_paths(metrics_doc, "metrics-json")
-
-    for block in files:
-        if block.type == "image":
-            raw = base64.b64decode(block.data)
-            assert raw.startswith(b"\x89PNG")
-            assert block.mimeType == "image/png"
-    print("  [PASS] a 10-file cap attaches 10 files and drops the rest")
-
-
-def test_compute_metrics_size_limit() -> None:
-    original = server._MAX_ATTACHMENT_BYTES
-    server._MAX_ATTACHMENT_BYTES = 8
-    try:
-        blocks = asyncio.run(_compute(recovery_months=[12]))
-    finally:
-        server._MAX_ATTACHMENT_BYTES = original
-
-    assert blocks[0].type == "text"
-    assert _file_blocks(blocks) == []
-    summary = json.loads(blocks[0].text)
-    note = summary["summary"]["omitted_files_note"]
-    assert "over the 8 bytes limit" in note
-    assert "severity_map.png" in note
-    _assert_text_has_no_paths(blocks)
-    print("  [PASS] compute_metrics drops files over the size limit")
-
-
-def test_local_save_dir_returns_paths(tmp: Path) -> None:
-    shp = _write_fire_shapefile(tmp / "local_src", "Avinyó", "latin-1")
-    _set_ldid(shp, 0x57)
-    out = tmp / "local_out"
-    with (
-        patch.dict("os.environ", {"EFFIS_SAVE_DIR": str(out)}),
-        patch.object(server, "_MAX_ATTACHMENTS", 10),
-    ):
-        burnt = asyncio.run(_burnt_areas(tmp / "local_src"))
-        metrics = asyncio.run(_compute())
-
-    assert [block.type for block in burnt] == ["text"]
-    summary = json.loads(burnt[0].text)
-    geojson_path = Path(summary["geojson_path"])
-    assert geojson_path.is_absolute() and geojson_path.parent == out.resolve()
-    assert geojson_path.name.startswith("burnt_areas_2024-08-01_")
-    geojson = json.loads(geojson_path.read_text(encoding="utf-8"))
-    assert geojson["features"][0]["properties"]["COMMUNE"] == "Avinyó"
-
-    assert [block.type for block in metrics] == ["text"]
-    compact = json.loads(metrics[0].text)
+    compact = _summary(blocks)
     names = [entry["name"] for entry in compact["files"]]
-    assert names[:4] == ["severity_map.png", "burn_mask.png", "recovery_2020-06-01.png", "recovery_2020-06-01.csv"]
+    assert names[:4] == [
+        "severity_map.png",
+        "burn_mask.png",
+        "recovery_2020-06-01.png",
+        "recovery_2020-06-01.csv",
+    ]
     assert "metrics_2020-06-01.json" in names
     assert "composite_ndvi_Tplus_48mo.png" in names
-    assert len(names) > 10
-    assert "omitted_files" not in compact["summary"]
     for entry in compact["files"]:
         path = Path(entry["path"])
         assert path.is_file() and path.stat().st_size == entry["bytes"]
-    assert Path(compact["files"][0]["path"]).read_bytes().startswith(b"\x89PNG")
-    print("  [PASS] EFFIS_SAVE_DIR writes every file and returns paths, no bytes")
+        assert str(path) in blocks[0].text
+    severity = Image.open(BytesIO(Path(compact["files"][0]["path"]).read_bytes()))
+    burn = Image.open(BytesIO(Path(compact["files"][1]["path"]).read_bytes()))
+    assert severity.getpixel((0, 0)) == (139, 0, 0)
+    assert burn.getpixel((0, 0)) == 255
+    print(f"  [PASS] compute_metrics writes {len(names)} named files")
+
+
+def _ensure_middleware() -> None:
+    stack = getattr(server.mcp, "middleware", None)
+    if stack is None:
+        server.mcp.add_middleware(OutputFilesMiddleware(server_dir=SERVER_DIR))
+        return
+    if any(isinstance(item, OutputFilesMiddleware) for item in stack):
+        return
+    server.mcp.add_middleware(OutputFilesMiddleware(server_dir=SERVER_DIR))
+
+
+async def _call_through_middleware(name: str, arguments: dict):
+    _ensure_middleware()
+    async with Client(server.mcp) as client:
+        return await client.call_tool_mcp(name, arguments)
+
+
+def test_middleware_attaches_geojson_and_strips_the_path(tmp_path: Path) -> None:
+    shp = _write_fire_shapefile(tmp_path / "mw", "Avinyó", "latin-1")
+    _set_ldid(shp, 0x57)
+    with patch.dict(os.environ, _save_env(tmp_path)):
+        result = asyncio.run(
+            _call_through_middleware(
+                "get_effis_burnt_areas",
+                {
+                    "bbox": "23.0,37.5,24.0,38.5",
+                    "max_features": 5,
+                    "date": "2024-08-01",
+                    "shapefile_dir": str(tmp_path / "mw"),
+                },
+            )
+        )
+    blobs = [block for block in result.content if block.type == "resource"]
+    assert len(blobs) == 1
+    filename = str(blobs[0].resource.uri).rsplit("/", 1)[-1]
+    assert filename.startswith("burnt_areas_2024-08-01_")
+    assert filename.endswith(".geojson")
+    text = result.content[0].text
+    assert filename in text
+    assert str(tmp_path) not in text
+    print("  [PASS] middleware attaches the named GeoJSON and strips its path")
+
+
+def test_middleware_skips_an_oversize_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MCP_MAX_ATTACHMENT_BYTES", "40")
+    shp = _write_fire_shapefile(tmp_path / "big", "Avinyó", "latin-1")
+    _set_ldid(shp, 0x57)
+    monkeypatch.setenv("EFFIS_SAVE_DIR", str(tmp_path / "out"))
+    result = asyncio.run(
+        _call_through_middleware(
+            "get_effis_burnt_areas",
+            {
+                "bbox": "23.0,37.5,24.0,38.5",
+                "max_features": 5,
+                "date": "2024-08-01",
+                "shapefile_dir": str(tmp_path / "big"),
+            },
+        )
+    )
+    assert all(block.type != "resource" for block in result.content)
+    note = "\n".join(block.text for block in result.content if block.type == "text")
+    assert "over the 40 bytes limit" in note
+    assert ".geojson" in note
+    assert str(tmp_path) not in note
+    print("  [PASS] middleware names an oversize GeoJSON and does not attach it")
 
 
 def run_return_file_tests() -> None:
     import tempfile
 
     print("\n" + "=" * 60)
-    print("  UNIT TEST: tool results return file bytes")
+    print("  UNIT TEST: tools name output files")
     print("=" * 60)
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
-        test_shapefile_ldid_and_geojson_blob(tmp)
+        test_shapefile_ldid_writes_geojson(tmp)
         test_cpg_greek_and_literal_question_marks(tmp)
         test_gml_utf8_greek(tmp)
-        test_geojson_over_size_limit(tmp)
-        test_local_save_dir_returns_paths(tmp)
-    test_default_limits_attach_whole_run()
-    test_compute_metrics_file_cap_and_types()
-    test_compute_metrics_size_limit()
+        test_compute_metrics_writes_named_files(tmp)
+        test_middleware_attaches_geojson_and_strips_the_path(tmp)
 
 
 if __name__ == "__main__":

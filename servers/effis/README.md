@@ -4,15 +4,11 @@ MCP server for European wildfire analysis. It retrieves burnt area polygons from
 
 ## Output files
 
-By default the tools return their files inside the tool result: GeoJSON, CSV and JSON as embedded resources, plots as images. This lets a remote client store them, because it cannot read the server's disk. Each call carries at most 20 files of up to 50 MB each. EVE's backend stores at most 10 files of 25 MB by default, so raise its `ARTIFACT_MAX_PER_TOOL_CALL` and `ARTIFACT_MAX_BYTES` to keep the rest.
+The tools write GeoJSON, CSV, JSON, and plots under `EFFIS_SAVE_DIR`. When that variable is unset, they use a folder named `effis` in the system temp directory. The tool result names the absolute path of each file it means to return.
 
-When the server runs on the same machine as the client, set `EFFIS_SAVE_DIR` to a folder. The tools then write every file there and return only the paths, which keeps raw bytes out of the model context:
+The image starts the server through `eve_mcp_runtime`. That launcher reads those paths, attaches the files, and replaces each absolute path with the file name. Images become image blocks. Other files become embedded resources. It attaches at most `MCP_MAX_ATTACHMENTS` files (default 20), each at most `MCP_MAX_ATTACHMENT_BYTES` bytes (default 50 MB). A file past a cap is named in a note and is not attached. `python server.py` without the launcher returns the paths and does not attach the bytes.
 
-```bash
-EFFIS_SAVE_DIR=~/fire_maps python server.py --transport stdio
-```
-
-Do not set `EFFIS_SAVE_DIR` on a remote deployment: the client cannot open those paths.
+EVE stores image and resource blocks as artifacts. Its defaults keep 10 files of 25 MB, so raise `ARTIFACT_MAX_PER_TOOL_CALL` and `ARTIFACT_MAX_BYTES` to keep the rest.
 
 <!-- BEGIN GENERATED CITATION: edit CITATION.cff, then run `python scripts/citation.py servers/<name>` -->
 

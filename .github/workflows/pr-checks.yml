@@ -124,9 +124,14 @@ jobs:
 
       - name: Build image (${{ matrix.server }})
         run: |
-          docker build \
+          if [ -f "servers/${{ matrix.server }}/Dockerfile" ]; then
+            DOCKERFILE="servers/${{ matrix.server }}/Dockerfile"
+          else
+            DOCKERFILE="shared/Dockerfile"
+          fi
+          docker buildx build \
             --platform linux/amd64 \
-            -f shared/Dockerfile \
+            -f "$DOCKERFILE" \
             "servers/${{ matrix.server }}"
 
   # ─── Require maintainer approval when shared infra is touched ─────────
