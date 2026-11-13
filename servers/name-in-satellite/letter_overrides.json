@@ -1,0 +1,6 @@
+{
+ "_comment": "Hand-tuned Sentinel-2 crops for letters that NASA rotated, zoomed or centred differently. rotate_deg: counter-clockwise rotation NASA applied; shift_km: [east, north] from the listed coordinate to the letter centre; meters_per_pixel: ground size of one Landsat-tile pixel.",
+ "a_6": {"rotate_deg": 213, "shift_km": [-0.3, -0.4], "meters_per_pixel": 38},
+ "a_7": {"rotate_deg": 213, "shift_km": [-0.3, -0.4], "meters_per_pixel": 38},
+ "a_8": {"rotate_deg": 213, "shift_km": [-0.3, -0.4], "meters_per_pixel": 38}
+}
