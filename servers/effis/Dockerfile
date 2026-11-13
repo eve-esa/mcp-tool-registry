@@ -12,6 +12,8 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Includes .env when the deploy workflow has replaced the .env.template
+# placeholders. .dockerignore must not exclude that file.
 COPY . .
 
 # ~200 MiB compressed from EFFIS WFS; allow up to 30 min on slow links / emulated ARM builds.

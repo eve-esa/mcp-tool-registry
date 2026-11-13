@@ -1,8 +1,10 @@
 # Avoid sending a local cache to the daemon; image builds its own via Dockerfile RUN.
+# Keep .env. deploy.yml writes it from .env.template before the image build,
+# and server.py loads it with load_dotenv. Ignoring it leaves the container
+# without CDSE_CLIENT_ID and CDSE_CLIENT_SECRET.
 effis_layer/
 __pycache__/
 *.py[cod]
-.env
 .pytest_cache/
 tests/
 .git/
