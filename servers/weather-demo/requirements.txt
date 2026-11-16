@@ -1,0 +1,4 @@
+mcp[cli]
+httpx
+python-dotenv
+requests
