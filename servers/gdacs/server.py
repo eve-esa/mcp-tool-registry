@@ -37,8 +37,6 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
-logger = logging.getLogger("disasters-mcp")
-
 GDACS_SEARCH_URL = "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH"
 TIMEOUT = 60
 GDACS_USER_AGENT = "DisastersMCPServer"
