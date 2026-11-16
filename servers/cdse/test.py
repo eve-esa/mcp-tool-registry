@@ -1,5 +1,5 @@
-import asyncio
 import argparse
+import asyncio
 import base64
 import os
 import sys
@@ -221,7 +221,7 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_tests(args: argparse.Namespace) -> list[tuple]:
     if args.list:
         print(head("Available tests"))
-        for key, label, tool, _ in TESTS:
+        for key, label, _tool, _ in TESTS:
             print(f"  {CYAN}{key:<30}{RESET}  {label}")
         sys.exit(0)
 
