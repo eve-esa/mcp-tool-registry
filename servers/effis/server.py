@@ -180,7 +180,7 @@ def _add_months(dt: datetime, months: int) -> datetime:
 
 
 # Per-scene visualization downloads stop here. The launcher attaches at most
-# MCP_MAX_ATTACHMENTS files (default 20) and names anything past that.
+# MCP_MAX_ATTACHMENTS files (default 100) and names anything past that.
 _MAX_VIS_IMAGES = 99
 
 
