@@ -181,9 +181,9 @@ class OutputFilesMiddleware(Middleware):
 
     def _limits(self) -> tuple[int, int]:
         try:
-            max_count = int(os.environ.get("MCP_MAX_ATTACHMENTS", "20"))
+            max_count = int(os.environ.get("MCP_MAX_ATTACHMENTS", "100"))
         except ValueError:
-            max_count = 20
+            max_count = 100
         try:
             max_bytes = int(os.environ.get("MCP_MAX_ATTACHMENT_BYTES", str(50 * 1024 * 1024)))
         except ValueError:

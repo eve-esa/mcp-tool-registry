@@ -137,6 +137,23 @@ def test_denylist_leaves_text_unchanged(tmp_path: Path, monkeypatch: pytest.Monk
         assert len(result.content) == 1, sample
 
 
+def test_default_cap_keeps_one_hundred_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("MCP_MAX_ATTACHMENTS", raising=False)
+    mcp = _server(tmp_path)
+    out = tmp_path / "out"
+    paths = []
+    for index in range(101):
+        path = out / f"frame_{index}.txt"
+        path.write_text("ok")
+        paths.append(str(path))
+    result = _call(mcp, "show", {"text": " ".join(paths)})
+    blobs = [block for block in result.content if isinstance(block, EmbeddedResource)]
+    assert len(blobs) == 100
+    note = _texts(result)
+    assert "frame_100.txt" in note
+    assert "within 100 files" in note
+
+
 def test_caps_add_a_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MCP_MAX_ATTACHMENTS", "1")
     monkeypatch.setenv("MCP_MAX_ATTACHMENT_BYTES", "8")
