@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: Wildfire Flood MCP Server
+abstract: >-
+  MCP server for the wildfire-to-flood cascade. For a burned area it measures
+  burn severity from Sentinel-2, finds steep burned slopes and nearby buildings
+  (Copernicus DEM, ESA WorldCover), and checks whether past or forecast rain
+  (Open-Meteo) crosses the USGS M1 debris-flow threshold (Staley et al. 2017).
+  It chains with the EFFIS server.
+authors:
+  - given-names: Cesar
+    family-names: Guzman
+    alias: cguz
+    affiliation: Solenix
+    orcid: https://orcid.org/0000-0002-0552-0967
+    email: cesar.guzman@solenix.ch
+  - given-names: Matteo
+    family-names: Zuracki
+    affiliation: Serco
+keywords:
+  - mcp
+  - earth-observation
+  - wildfire
+  - debris-flow
+  - flood
+  - sentinel-2
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/wildfire_flood
