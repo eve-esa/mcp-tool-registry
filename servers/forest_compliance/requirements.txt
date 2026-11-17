@@ -1,0 +1,8 @@
+# mcp is pinned: 2.x dropped the vendored mcp.server.fastmcp module (FastMCP was
+# renamed MCPServer). server.py imports it, so an unpinned mcp breaks the build.
+mcp[cli]==1.27.0
+# rasterio wheels bundle GDAL with HTTP range-read (/vsicurl/) support.
+rasterio>=1.4.3,<2
+numpy>=2.0
+matplotlib>=3.9,<4
+pillow>=10
