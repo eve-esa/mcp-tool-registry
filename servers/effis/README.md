@@ -15,6 +15,7 @@ EVE stores image and resource blocks as artifacts. Its defaults keep 100 files o
 ## Authors
 
 - **Antonio Lopez**, [@Lopez-Antonio](https://github.com/Lopez-Antonio), Pi School
+- **Jino Rohit**, [@JINO-ROHIT](https://github.com/JINO-ROHIT), Pi School
 
 ## Citation
 
