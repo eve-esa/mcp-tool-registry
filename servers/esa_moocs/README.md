@@ -6,8 +6,6 @@ MCP server for semantic search over ESA Earth Observation MOOC transcripts, usin
 
 ## Authors
 
-- **Antonio Lopez**, [@Lopez-Antonio](https://github.com/Lopez-Antonio), Pi School
-- **Jino Rohit**, [@JINO-ROHIT](https://github.com/JINO-ROHIT), Pi School
 - **[Eva Gmelich Meijling](https://cin.philab.esa.int/databases/researchers-db/eva-gmelich-meijling)**, [@Evameijling](https://github.com/Evameijling), ESA's Φ-lab
 
 ## Citation
