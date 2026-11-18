@@ -6,14 +6,6 @@ abstract: >-
   MCP server for semantic search over ESA Earth Observation MOOC transcripts,
   using a local Qdrant vector store.
 authors:
-  - given-names: Antonio
-    family-names: Lopez
-    alias: Lopez-Antonio
-    affiliation: Pi School
-  - given-names: Jino
-    family-names: Rohit
-    alias: JINO-ROHIT
-    affiliation: Pi School
   - given-names: Eva
     family-names: Gmelich Meijling
     alias: Evameijling
