@@ -14,6 +14,11 @@ authors:
     family-names: Rohit
     alias: JINO-ROHIT
     affiliation: Pi School
+  - given-names: Eva
+    family-names: Gmelich Meijling
+    alias: Evameijling
+    affiliation: University of Amsterdam
+    website: https://cin.philab.esa.int/databases/researchers-db/eva-gmelich-meijling
 keywords:
   - mcp
   - earth-observation
