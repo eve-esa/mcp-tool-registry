@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: SerpAPI MCP Server
+abstract: >-
+  MCP server that searches the web through SerpAPI and returns organic Google
+  results.
+authors:
+  - given-names: Antonio
+    family-names: Lopez
+    alias: Lopez-Antonio
+    affiliation: Pi School
+  - given-names: Jino
+    family-names: Rohit
+    alias: JINO-ROHIT
+    affiliation: Pi School
+keywords:
+  - mcp
+  - search
+  - serpapi
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/serpapi

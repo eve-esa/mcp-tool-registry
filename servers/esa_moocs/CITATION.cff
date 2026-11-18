@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: ESA MOOCs MCP Server
+abstract: >-
+  MCP server for semantic search over ESA Earth Observation MOOC transcripts,
+  using a local Qdrant vector store.
+authors:
+  - given-names: Antonio
+    family-names: Lopez
+    alias: Lopez-Antonio
+    affiliation: Pi School
+  - given-names: Jino
+    family-names: Rohit
+    alias: JINO-ROHIT
+    affiliation: Pi School
+keywords:
+  - mcp
+  - earth-observation
+  - mooc
+  - retrieval
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/esa_moocs

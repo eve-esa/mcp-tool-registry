@@ -12,6 +12,10 @@ authors:
     family-names: Lopez
     alias: Lopez-Antonio
     affiliation: Pi School
+  - given-names: Jino
+    family-names: Rohit
+    alias: JINO-ROHIT
+    affiliation: Pi School
 keywords:
   - mcp
   - earth-observation

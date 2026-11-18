@@ -12,6 +12,10 @@ authors:
   - given-names: Edward
     family-names: Jeffrey
     email: edward.jeffrey@imperativespace.com
+  - given-names: Antonio
+    family-names: Lopez
+    alias: Lopez-Antonio
+    affiliation: Pi School
 keywords:
   - mcp
   - gdacs

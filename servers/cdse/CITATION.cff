@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: CDSE Imagery MCP Server
+abstract: >-
+  MCP server for Sentinel-1, Sentinel-2, Sentinel-3, Sentinel-5P, Landsat and
+  DEM imagery from the Copernicus Data Space Ecosystem (Sentinel Hub).
+authors:
+  - given-names: Antonio
+    family-names: Lopez
+    alias: Lopez-Antonio
+    affiliation: Pi School
+  - given-names: Jino
+    family-names: Rohit
+    alias: JINO-ROHIT
+    affiliation: Pi School
+keywords:
+  - mcp
+  - earth-observation
+  - copernicus
+  - sentinel
+  - landsat
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/cdse
