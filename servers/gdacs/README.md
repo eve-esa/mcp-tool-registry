@@ -6,7 +6,7 @@ MCP server for global natural disaster and hazard monitoring via GDACS (Global D
 
 ## Authors
 
-- **Edward Jeffrey**
+- **Edward Jeffrey**, Imperative Space
 - **Antonio Lopez**, [@Lopez-Antonio](https://github.com/Lopez-Antonio), Pi School
 
 ## Citation
