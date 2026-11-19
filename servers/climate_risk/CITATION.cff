@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: Climate Risk MCP Server
+abstract: >-
+  MCP server for drought and climate anomalies at any point on Earth. It
+  computes SPI and SPEI drought indices, temperature and rain anomalies against
+  the 1991-2020 baseline, and drought charts from the ERA5 reanalysis (ECMWF,
+  Copernicus Climate Change Service) served by the Open-Meteo Historical
+  Weather API.
+authors:
+  - given-names: Cesar
+    family-names: Guzman
+    alias: cguz
+    affiliation: Solenix
+    orcid: https://orcid.org/0000-0002-0552-0967
+    email: cesar.guzman@solenix.ch
+  - given-names: Matteo
+    family-names: Zuracki
+    affiliation: Serco
+keywords:
+  - mcp
+  - earth-observation
+  - climate
+  - drought
+  - spi
+  - spei
+  - era5
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/climate_risk
