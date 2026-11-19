@@ -141,8 +141,9 @@ async def test_search_all_events(session: ClientSession) -> dict:
     assert {e["alert_level"] for e in events} <= {"Orange", "Red"}, "Green should be left out by default"
     assert "Green (low-impact) events are not included" in parsed["note"], "Expected the Green note"
     assert next(iter(parsed)) == "note", "note should be the first key"
-    dates = [e["from_date"] for e in events]
-    assert dates == sorted(dates, reverse=True), "Events should be newest first"
+    rank = {"Red": 2, "Orange": 1, "Green": 0}
+    order = [(rank[e["alert_level"]], e["from_date"]) for e in events]
+    assert order == sorted(order, reverse=True), "Events should be highest alert first, then newest"
     print(f"\n  Elapsed:  {elapsed:.1f}s")
     print(f"  events:   {len(events)}")
     print("  [PASS] search_gdacs_events returned events")
@@ -233,6 +234,21 @@ async def test_paging(session: ClientSession) -> None:
     assert year["total_is_lower_bound"] is True, "Expected more than 500 matches"
     assert "more exist" in year["summary"]["covers"], year["summary"]["covers"]
     assert "minimums" in year["note"] and "counts all" not in year["note"], year["note"]
+
+    # Mixed levels over a busy year: Green fills the 500, so the server must
+    # fetch Orange/Red separately and count all of them (2023 includes the
+    # two Red Turkey earthquakes of 6 February).
+    all_levels = {"eventlist": "EQ", "alertlevel": ["Green", "Orange", "Red"],
+                  "from_date": "2023-01-01", "to_date": "2023-12-31", "max_results": 10}
+    mixed = await _call(session, all_levels)
+    serious_only = await _call(session, {**all_levels, "alertlevel": ["Orange", "Red"], "max_results": 100})
+    assert mixed["total_is_lower_bound"] is True, "Expected more than 500 matches in 2023"
+    for level in ("Red", "Orange"):
+        assert mixed["summary"]["by_alert_level"].get(level) == serious_only["summary"]["by_alert_level"].get(level), (
+            f"{level} count should be complete: {mixed['summary']['by_alert_level']} vs {serious_only['summary']['by_alert_level']}"
+        )
+    assert "every Orange and Red" in mixed["summary"]["covers"], mixed["summary"]["covers"]
+    assert mixed["events"][0]["alert_level"] == "Red", "Red events should be listed first"
 
     small = await _call(session, {**args, "max_results": 5})
     assert len(small["events"]) == 5 and small["truncated"] is True

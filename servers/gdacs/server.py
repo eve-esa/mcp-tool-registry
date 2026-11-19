@@ -135,6 +135,8 @@ DISPLAY_NAMES: dict[str, str] = {
     for name in names + spellings
 }
 
+ALERT_RANK = {"Red": 2, "Orange": 1, "Green": 0}
+
 EVENT_TYPE_NAMES = {
     "EQ": "earthquake", "TC": "tropical cyclone", "FL": "flood",
     "VO": "volcano", "WF": "wildfire", "DR": "drought", "TS": "tsunami",
@@ -367,7 +369,8 @@ async def search_gdacs_events(
     active_only: True keeps only events still ongoing (GDACS marks them
         current, or updated them in the last 7 days). Use for "right now",
         "currently", "active".
-    max_results: Number of events to list (1-100, default 50), newest first.
+    max_results: Number of events to list (1-100, default 50), highest alert
+        level first, then newest.
         Values above 100 are lowered to 100. The summary counts every match
         (up to 500), so for "how many" questions read the summary instead.
     format: "compact" (default) returns a short record per event.
@@ -383,12 +386,13 @@ async def search_gdacs_events(
         - total: events matching the query; total_is_lower_bound=true means
           GDACS has more than were counted
         - summary: counts by type, alert level and country. covers says
-          whether it counts every match or only the newest 500 (when
-          total_is_lower_bound is true: counts are minimums, and older
-          events, including Orange or Red ones, may be missing)
+          what it counts. When more than 500 events match, every Orange and
+          Red event is still fetched and counted; only Green counts (and
+          the total) are then minimums
         - count, truncated: how many events are listed, and whether that is
           fewer than total. A truncated list is partial: say so.
-        - events: newest first, each with id, type, type_name, name,
+        - events: highest alert level first (Red, Orange, Green), then
+          newest, each with id, type, type_name, name,
           alert_level, countries, from_date, to_date, is_current, severity,
           lat, lon and report_url
         If nothing matches, an "error" says so and why.
@@ -458,10 +462,28 @@ async def search_gdacs_events(
             )
             pairs = keep(features)
             fell_back_to_green = bool(pairs)
+
+        # Green events far outnumber the rest, so when a search that includes
+        # Green hits the fetch limit, the serious events are the first to be
+        # cut. Fetch Orange/Red separately (a small, complete set) and merge
+        # them in, so they are never missing from the events or the summary.
+        levels = set([alertlevel] if isinstance(alertlevel, str) else alertlevel or [])
+        serious = sorted(levels & {"Orange", "Red"})
+        serious_complete = False
+        if more and "Green" in levels and serious:
+            _, serious_features, serious_more, serious_requests = await _search(
+                {**params, "alertlevel": ";".join(serious)}, searches, spellings
+            )
+            requests += serious_requests
+            seen = {(e["type"], e["id"]) for _, e in pairs}
+            pairs += [(f, e) for f, e in keep(serious_features) if (e["type"], e["id"]) not in seen]
+            serious_complete = not serious_more
     except Exception as exc:
         return json.dumps({"error": f"Disaster search failed: {exc}"})
 
-    pairs.sort(key=lambda p: p[1]["from_date"] or "", reverse=True)
+    # Highest alert level first, then newest: agents take "key events" from
+    # the top of the list.
+    pairs.sort(key=lambda p: (ALERT_RANK.get(p[1]["alert_level"], 0), p[1]["from_date"] or ""), reverse=True)
 
     if first is None or not pairs:
         included_green = alertlevel is None or "Green" in (
@@ -473,7 +495,15 @@ async def search_gdacs_events(
     count = min(total, max_results)
     truncated = more or total > max_results
     summary = _summary([e for _, e in pairs])
-    summary["covers"] = f"newest {total} matches only; more exist" if more else f"all {total} matches"
+    if not more:
+        summary["covers"] = f"all {total} matches"
+    elif serious_complete:
+        summary["covers"] = (
+            f"the newest {FETCH_LIMIT} events plus every Orange and Red match: "
+            "Orange and Red counts are complete, Green counts are minimums"
+        )
+    else:
+        summary["covers"] = f"the newest {FETCH_LIMIT} events only; more exist"
     meta: dict[str, Any] = {
         "retrieved_at": today.isoformat(),
         "total": total,
@@ -492,17 +522,24 @@ async def search_gdacs_events(
             "Green (low-impact) events are not included; pass "
             "alertlevel=['Green', 'Orange', 'Red'] to include them."
         )
-    if more:
+    if more and serious_complete:
         notes.append(
-            f"Listing the newest {count} of at least {total} matching events. The summary only "
-            f"covers the newest {total} of them, so its counts are minimums and older events "
-            "(including Orange or Red ones) may be missing. For exact counts or rankings, "
-            "split the period into smaller date windows."
+            f"Listing {count} of at least {total} matching events, highest alert level first. "
+            f"Every Orange and Red event is included and counted, but only the newest "
+            f"{FETCH_LIMIT} events were checked for Green, so Green counts and the total are "
+            "minimums. For exact Green counts, split the period into smaller date windows."
+        )
+    elif more:
+        notes.append(
+            f"Listing {count} of at least {total} matching events. Only the newest "
+            f"{FETCH_LIMIT} events were checked, so the summary counts are minimums and older "
+            "events may be missing. For exact counts or rankings, split the period into "
+            "smaller date windows."
         )
     elif truncated:
         notes.append(
-            f"Listing the newest {count} of {total} matching events: this is a partial "
-            f"list. The summary counts all {total}."
+            f"Listing {count} of {total} matching events, highest alert level first: this is "
+            f"a partial list. The summary counts all {total}."
         )
     if notes:
         # First key in the response, so the agent reads it before the data.
