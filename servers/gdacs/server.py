@@ -382,7 +382,10 @@ async def search_gdacs_events(
         - retrieved_at: today's date (UTC)
         - total: events matching the query; total_is_lower_bound=true means
           GDACS has more than were counted
-        - summary: counts of all matches by type, alert level and country
+        - summary: counts by type, alert level and country. covers says
+          whether it counts every match or only the newest 500 (when
+          total_is_lower_bound is true: counts are minimums, and older
+          events, including Orange or Red ones, may be missing)
         - count, truncated: how many events are listed, and whether that is
           fewer than total. A truncated list is partial: say so.
         - events: newest first, each with id, type, type_name, name,
@@ -460,12 +463,13 @@ async def search_gdacs_events(
     total = len(pairs)
     count = min(total, max_results)
     truncated = more or total > max_results
-    plus = "+" if more else ""
+    summary = _summary([e for _, e in pairs])
+    summary["covers"] = f"newest {total} matches only; more exist" if more else f"all {total} matches"
     meta: dict[str, Any] = {
         "retrieved_at": today.isoformat(),
         "total": total,
         "total_is_lower_bound": more,
-        "summary": _summary([e for _, e in pairs]),
+        "summary": summary,
         "count": count,
         "truncated": truncated,
     }
@@ -479,10 +483,17 @@ async def search_gdacs_events(
             "Green (low-impact) events are not included; pass "
             "alertlevel=['Green', 'Orange', 'Red'] to include them."
         )
-    if truncated:
+    if more:
         notes.append(
-            f"Listing the newest {count} of {total}{plus} matching events: this is a partial "
-            f"list. The summary counts all {total}{plus}."
+            f"Listing the newest {count} of at least {total} matching events. The summary only "
+            f"covers the newest {total} of them, so its counts are minimums and older events "
+            "(including Orange or Red ones) may be missing. For exact counts or rankings, "
+            "split the period into smaller date windows."
+        )
+    elif truncated:
+        notes.append(
+            f"Listing the newest {count} of {total} matching events: this is a partial "
+            f"list. The summary counts all {total}."
         )
     if notes:
         # First key in the response, so the agent reads it before the data.

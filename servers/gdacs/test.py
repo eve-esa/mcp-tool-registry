@@ -225,6 +225,14 @@ async def test_paging(session: ClientSession) -> None:
     assert parsed["truncated"] is True
     assert parsed["total"] > 150, "total should count every match across pages, not only the listed events"
     assert sum(parsed["summary"]["by_alert_level"].values()) == parsed["total"]
+    assert parsed["summary"]["covers"] == f"all {parsed['total']} matches", parsed["summary"]["covers"]
+
+    # A year of Green earthquakes is far more than 500: the summary must say
+    # it only covers the newest 500, not claim to count everything.
+    year = await _call(session, {**args, "from_date": "2024-01-01", "max_results": 5})
+    assert year["total_is_lower_bound"] is True, "Expected more than 500 matches"
+    assert "more exist" in year["summary"]["covers"], year["summary"]["covers"]
+    assert "minimums" in year["note"] and "counts all" not in year["note"], year["note"]
 
     small = await _call(session, {**args, "max_results": 5})
     assert len(small["events"]) == 5 and small["truncated"] is True
