@@ -132,17 +132,19 @@ async def test_search_all_events(session: ClientSession) -> dict:
     elapsed = time.time() - t0
     parsed = _print_result(result)
     assert parsed is not None, "Failed to parse response"
+    assert "error" not in parsed, parsed.get("error")
 
-    if "error" in parsed:
-        print(f"\n  [FAIL] {parsed['error'][:200]}")
-        return parsed
-
-    features = parsed.get("features", [])
-    assert (
-        isinstance(features, list) and len(features) > 0
-    ), "Expected at least one event"
+    events = parsed.get("events", [])
+    assert isinstance(events, list) and events, "Expected at least one event"
+    assert parsed["count"] == len(events), "count does not match events"
+    assert parsed["retrieved_at"], "Missing retrieved_at"
+    assert {e["alert_level"] for e in events} <= {"Orange", "Red"}, "Green should be left out by default"
+    assert "Green (low-impact) events are not included" in parsed["note"], "Expected the Green note"
+    assert next(iter(parsed)) == "note", "note should be the first key"
+    dates = [e["from_date"] for e in events]
+    assert dates == sorted(dates, reverse=True), "Events should be newest first"
     print(f"\n  Elapsed:  {elapsed:.1f}s")
-    print(f"  events:   {len(features)}")
+    print(f"  events:   {len(events)}")
     print("  [PASS] search_gdacs_events returned events")
     return parsed
 
@@ -162,14 +164,166 @@ async def test_search_filtered(session: ClientSession) -> dict:
         print(f"\n  [INFO] {parsed['error'][:200]}")
         return parsed
 
-    features = parsed.get("features", [])
-    for f in features:
-        event_type = f.get("properties", {}).get("eventtype")
-        assert event_type == "EQ", f"Expected only EQ events, got {event_type}"
+    events = parsed.get("events", [])
+    for e in events:
+        assert e["type"] == "EQ", f"Expected only EQ events, got {e['type']}"
     print(f"\n  Elapsed:  {elapsed:.1f}s")
-    print(f"  events:   {len(features)}")
+    print(f"  events:   {len(events)}")
     print("  [PASS] search_gdacs_events filtered correctly")
     return parsed
+
+
+async def _call(session: ClientSession, args: dict) -> dict:
+    result = await session.call_tool("search_gdacs_events", args)
+    text = result.content[0].text
+    parsed = json.loads(text)
+    if "error" in parsed:
+        print(f"  {args} -> {parsed}")
+    else:
+        n = len(parsed.get("events") or parsed.get("features") or [])
+        print(f"  {args} -> {n} events, truncated={parsed.get('truncated')}, {len(text) / 1000:.0f} KB")
+    return parsed
+
+
+async def test_search_lists_and_dates(session: ClientSession) -> None:
+    """Lists of hazard types and alert levels, inside a past date range."""
+    _section("TEST: search_gdacs_events() — lists + date range")
+
+    # A fixed past window, so the expected events do not change over time.
+    args = {
+        "eventlist": ["EQ", "TC"],
+        "alertlevel": ["Green", "Orange", "Red"],
+        "from_date": "2024-12-30",
+        "to_date": "2024-12-31",
+    }
+    parsed = await _call(session, args)
+    events = parsed.get("events", [])
+    assert events, f"Expected events for {args}, got {parsed}"
+    for e in events:
+        assert e["type"] in {"EQ", "TC"}, e["type"]
+        assert e["to_date"] >= "2024-12-30", e["to_date"]
+        assert e["from_date"] <= "2024-12-31", e["from_date"]
+    assert any(e["alert_level"] == "Green" for e in events), "Expected Green events when Green is requested"
+    print("  [PASS] lists and date range applied")
+
+
+async def test_paging(session: ClientSession) -> None:
+    """Paging past GDACS's 100-event pages, the 100-event list cap and the summary."""
+    _section("TEST: search_gdacs_events() — paging past 100")
+
+    args = {
+        "eventlist": "EQ",
+        "alertlevel": "Green",
+        "from_date": "2024-12-01",
+        "to_date": "2024-12-31",
+        "max_results": 150,
+    }
+    parsed = await _call(session, args)
+    events = parsed.get("events", [])
+    assert len(events) == 100 == parsed["count"], f"Expected the list capped at 100, got {len(events)}"
+    assert "lowered" in parsed["note"] and "partial" in parsed["note"], parsed["note"]
+    assert parsed["truncated"] is True
+    assert parsed["total"] > 150, "total should count every match across pages, not only the listed events"
+    assert sum(parsed["summary"]["by_alert_level"].values()) == parsed["total"]
+
+    small = await _call(session, {**args, "max_results": 5})
+    assert len(small["events"]) == 5 and small["truncated"] is True
+
+    complete = await _call(session, {**args, "from_date": "2024-12-30", "max_results": 100})
+    assert complete["truncated"] is False and "note" not in complete, "Expected a complete result"
+    print("  [PASS] paging, max_results, count and truncated work")
+
+
+async def test_geojson_format(session: ClientSession) -> None:
+    """format='geojson' still returns the full GDACS FeatureCollection."""
+    _section("TEST: search_gdacs_events(format='geojson')")
+
+    args = {"eventlist": "EQ", "from_date": "2020-01-01", "to_date": "2020-12-31", "format": "geojson"}
+    parsed = await _call(session, args)
+    assert parsed.get("type") == "FeatureCollection", parsed.keys()
+    features = parsed["features"]
+    assert features and parsed["count"] == len(features)
+    assert all(f["properties"]["eventtype"] == "EQ" for f in features)
+
+    compact = await _call(session, {**args, "format": "compact"})
+    assert compact["count"] == parsed["count"], "Both formats should return the same events"
+    print("  [PASS] geojson format unchanged")
+
+
+async def test_country_spellings(session: ClientSession) -> None:
+    """Common country names are mapped to GDACS's own spellings."""
+    _section("TEST: search_gdacs_events() — country spellings")
+
+    # Kahramanmaras earthquake, 6 February 2023: GDACS lists it under "Türkiye".
+    args = {"eventlist": "EQ", "country": "Turkey", "from_date": "2023-02-01", "to_date": "2023-02-28"}
+    parsed = await _call(session, args)
+    events = parsed.get("events", [])
+    assert any(e["alert_level"] == "Red" and e["from_date"] == "2023-02-06" for e in events), (
+        f"Expected the Red 6 Feb 2023 earthquake, got {parsed}"
+    )
+    assert parsed["country_searched"] == ["Türkiye"]
+    assert all("Turkey" in e["countries"] for e in events), "GDACS spellings should show as Turkey"
+
+    # South Korea must not pull in North Korea ("Democratic Republic of Korea").
+    korea = await _call(
+        session,
+        {"country": "South Korea", "alertlevel": ["Green", "Orange", "Red"], "from_date": "2019-01-01", "max_results": 100},
+    )
+    for e in korea.get("events", []):
+        assert "South Korea" in e["countries"] and "Republic of Korea" not in e["countries"], e["countries"]
+    print("  [PASS] country names mapped")
+
+
+async def test_no_results_hints(session: ClientSession) -> None:
+    """An empty result explains why, so an agent can retry."""
+    _section("TEST: search_gdacs_events() — no-results hints")
+
+    # Only Green earthquakes on these days, and GDACS leaves Green out by
+    # default, so the server falls back to Green and says so.
+    fallback = await _call(session, {"eventlist": "EQ", "from_date": "2024-12-30", "to_date": "2024-12-31"})
+    assert fallback.get("events"), fallback
+    assert {e["alert_level"] for e in fallback["events"]} == {"Green"}
+    assert "these are Green" in fallback["note"] and "not included" not in fallback["note"], fallback["note"]
+
+    spelling = await _call(session, {"country": "Atlantis", "alertlevel": "Red"})
+    assert "spelling" in spelling.get("error", ""), spelling
+    print("  [PASS] Green fallback and empty-result hints work")
+
+
+async def test_since_days_and_active(session: ClientSession) -> None:
+    """Relative periods are worked out on the server; active_only keeps ongoing events."""
+    _section("TEST: search_gdacs_events() — since_days + active_only")
+
+    recent = await _call(session, {"eventlist": "EQ", "alertlevel": ["Green", "Orange", "Red"], "since_days": 21})
+    cutoff = recent["date_range"]["from"]
+    assert recent["date_range"]["to"] == recent["retrieved_at"]
+    assert all(e["to_date"] >= cutoff for e in recent["events"]), "Event older than since_days"
+    assert recent["count"] <= 50, "Default max_results should be 50"
+
+    active = await _call(session, {"alertlevel": ["Green", "Orange", "Red"], "active_only": True})
+    if "error" not in active:
+        for e in active["events"]:
+            assert e["is_current"] or e["to_date"] >= cutoff, e
+    print("  [PASS] since_days and active_only work")
+
+
+async def test_invalid_arguments(session: ClientSession) -> None:
+    """Bad arguments return a clear error instead of calling GDACS."""
+    _section("TEST: search_gdacs_events() — invalid arguments")
+
+    cases = [
+        ({"from_date": "2024-13-45"}, "YYYY-MM-DD"),
+        ({"to_date": "2024-12-31"}, "2000-01-01"),
+        ({"from_date": "2025-01-01", "to_date": "2024-01-01"}, "on or before"),
+        ({"max_results": 0}, "at least 1"),
+        ({"from_date": "2099-01-01"}, "no forecasts"),
+        ({"since_days": 7, "from_date": "2024-01-01"}, "not both"),
+        ({"since_days": 0}, "since_days must be"),
+    ]
+    for args, expected in cases:
+        parsed = await _call(session, args)
+        assert expected in parsed.get("error", ""), f"{args}: {parsed}"
+    print("  [PASS] invalid arguments rejected")
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +347,13 @@ async def run_tests(port: int) -> None:
                 await test_list_tools(session)
                 await test_search_all_events(session)
                 await test_search_filtered(session)
+                await test_search_lists_and_dates(session)
+                await test_paging(session)
+                await test_geojson_format(session)
+                await test_country_spellings(session)
+                await test_no_results_hints(session)
+                await test_since_days_and_active(session)
+                await test_invalid_arguments(session)
 
 
 def main():
