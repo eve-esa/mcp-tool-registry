@@ -435,23 +435,32 @@ async def search_gdacs_events(
     spellings = COUNTRY_ALIASES.get(_norm(country)) if country else None
     searches: list[str | None] = spellings or [country]
 
+    cutoff = (today - timedelta(days=ACTIVE_WINDOW_DAYS)).isoformat()
+
+    def keep(features: list[dict]) -> list[tuple[dict, dict]]:
+        """Compact each feature, and drop finished events when active_only is set."""
+        pairs = [(f, _compact(f)) for f in features]
+        if active_only:
+            pairs = [(f, e) for f, e in pairs if e["is_current"] or (e["to_date"] or "") >= cutoff]
+        return pairs
+
     fell_back_to_green = False
     try:
         first, features, more, requests = await _search(params, searches, spellings)
-        if not features and alertlevel is None:
+        pairs = keep(features)
+        if not pairs and alertlevel is None:
             # GDACS leaves Green out by default; an agent asking "any
-            # earthquakes on 31 December?" wants the Green ones too.
+            # earthquakes on 31 December?" wants the Green ones too. Checked
+            # after the active_only filter: Orange/Red events that have all
+            # ended must not stop the search for active Green ones.
             first, features, more, requests = await _search(
                 {**params, "alertlevel": "Green"}, searches, spellings
             )
-            fell_back_to_green = bool(features)
+            pairs = keep(features)
+            fell_back_to_green = bool(pairs)
     except Exception as exc:
         return json.dumps({"error": f"Disaster search failed: {exc}"})
 
-    pairs = [(f, _compact(f)) for f in features]
-    if active_only:
-        cutoff = (today - timedelta(days=ACTIVE_WINDOW_DAYS)).isoformat()
-        pairs = [(f, e) for f, e in pairs if e["is_current"] or (e["to_date"] or "") >= cutoff]
     pairs.sort(key=lambda p: p[1]["from_date"] or "", reverse=True)
 
     if first is None or not pairs:

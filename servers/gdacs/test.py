@@ -312,6 +312,14 @@ async def test_since_days_and_active(session: ClientSession) -> None:
     if "error" not in active:
         for e in active["events"]:
             assert e["is_current"] or e["to_date"] >= cutoff, e
+
+    # If any tropical cyclone is active at any alert level, a search without
+    # alertlevel must find it: the Green fallback has to run after the
+    # active_only filter, not before it.
+    every_level = await _call(session, {"eventlist": "TC", "alertlevel": ["Green", "Orange", "Red"], "active_only": True})
+    default = await _call(session, {"eventlist": "TC", "active_only": True})
+    if "error" not in every_level:
+        assert "error" not in default, f"Active cyclones exist but the default search found none: {default}"
     print("  [PASS] since_days and active_only work")
 
 
