@@ -317,6 +317,15 @@ async def test_country_spellings(session: ClientSession) -> None:
     )
     for e in korea.get("events", []):
         assert "South Korea" in e["countries"] and "Republic of Korea" not in e["countries"], e["countries"]
+
+    # Brackets are dropped: "Myanmar (Burma)" searches Myanmar (Red M7.7
+    # earthquake, 28 March 2025).
+    bracketed = await _call(session, {"country": "Myanmar (Burma)", "eventlist": "EQ", "alertlevel": "Red",
+                                      "from_date": "2025-03-01", "to_date": "2025-03-31"})
+    assert bracketed.get("events"), bracketed
+    assert bracketed["country_searched"] == ["Myanmar"], bracketed["country_searched"]
+    # "South Africa" is a country, not the "Africa" region.
+    assert "error" not in (await _call(session, {"country": "South Africa", "alertlevel": ["Green", "Orange", "Red"]}))
     print("  [PASS] country names mapped")
 
 
@@ -375,6 +384,8 @@ async def test_invalid_arguments(session: ClientSession) -> None:
         ({"since_days": 0}, "since_days must be"),
         ({"eventlist": "TS"}, "no tsunami"),
         ({"min_severity": -1}, "min_severity"),
+        ({"country": "Africa"}, "continent or region"),
+        ({"country": "the Caribbean"}, "continent or region"),
     ]
     for args, expected in cases:
         parsed = await _call(session, args)

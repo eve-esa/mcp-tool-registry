@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 import unicodedata
 from collections import Counter
@@ -136,6 +137,21 @@ DISPLAY_NAMES: dict[str, str] = {
     _norm(name): names[0]
     for names, spellings in _COUNTRY_SPELLINGS
     for name in names + spellings
+}
+
+# Continents, oceans and regions are not countries. GDACS's partial match
+# would turn "Africa" into "Central African Republic" and "South Africa", so
+# these are rejected with a hint instead. (Antarctica is a GDACS country.)
+REGION_NAMES = {
+    "africa", "north africa", "west africa", "east africa", "central africa",
+    "southern africa", "sub-saharan africa", "horn of africa", "sahel",
+    "europe", "western europe", "eastern europe", "southern europe", "northern europe",
+    "scandinavia", "balkans", "asia", "east asia", "south asia", "southeast asia",
+    "south-east asia", "central asia", "middle east", "oceania", "australasia",
+    "north america", "south america", "central america", "latin america",
+    "americas", "caribbean", "the caribbean", "pacific", "the pacific",
+    "pacific ocean", "atlantic", "atlantic ocean", "indian ocean", "mediterranean",
+    "arctic", "world", "worldwide", "global",
 }
 
 ALERT_RANK = {"Red": 2, "Orange": 1, "Green": 0}
@@ -402,6 +418,9 @@ async def search_gdacs_events(
     country: Optional country name in English (e.g. "Philippines", "Turkey").
         One country only: for several, call once per country. Common names
         are mapped to GDACS's spellings. Leave unset to search globally.
+        Continents and regions ("Africa", "the Caribbean") are rejected:
+        search without country and keep the events whose countries are in
+        that region.
     since_days: Events from the last N days (1-3650), counted from today on
         the server. Use this for relative periods ("this week" = 7, "last
         few weeks" = 21, "this year" = days since 1 January) instead of
@@ -505,6 +524,16 @@ async def search_gdacs_events(
     }
     params = {k: v for k, v in params.items() if v is not None and v != ""}
 
+    if country:
+        # "Myanmar (Burma)" -> "Myanmar": GDACS has no names with brackets.
+        cleaned = re.sub(r"\s*\([^)]*\)", "", country).strip() or country.strip("() ")
+        if _norm(cleaned) in REGION_NAMES:
+            return json.dumps({
+                "error": f"{country!r} is a continent or region, not a country. Search without "
+                "country, then keep only the events whose countries field lists countries in "
+                f"{cleaned}, and count only those."
+            })
+        country = cleaned
     spellings = COUNTRY_ALIASES.get(_norm(country)) if country else None
     searches: list[str | None] = spellings or [country]
 
@@ -636,8 +665,8 @@ async def search_gdacs_events(
         meta = {"note": " ".join(notes), **meta}
     if start:
         meta["date_range"] = {"from": start, "to": end or today.isoformat()}
-    if spellings:
-        meta["country_searched"] = spellings
+    if country:
+        meta["country_searched"] = spellings or [country]
 
     if format == "geojson":
         first["features"] = [f for f, _ in pairs[:max_results]]
