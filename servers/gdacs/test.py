@@ -205,6 +205,18 @@ async def test_search_lists_and_dates(session: ClientSession) -> None:
         assert e["to_date"] >= "2024-12-30", e["to_date"]
         assert e["from_date"] <= "2024-12-31", e["from_date"]
     assert any(e["alert_level"] == "Green" for e in events), "Expected Green events when Green is requested"
+
+    # GDACS's search breaks when "TS" is in the list ("EQ;TS" returns a small
+    # subset of earthquakes). Every type, TS included, must match no filter.
+    window = {"alertlevel": ["Green", "Orange", "Red"], "from_date": "2024-12-30", "to_date": "2024-12-31"}
+    every_type = await _call(session, {**window, "eventlist": ["EQ", "TC", "FL", "VO", "WF", "DR", "TS"]})
+    no_filter = await _call(session, window)
+    assert every_type["total"] == no_filter["total"], (every_type["total"], no_filter["total"])
+    assert every_type["summary"]["by_type"] == no_filter["summary"]["by_type"]
+    assert "Tsunamis (TS) cannot be searched" in every_type["note"], every_type.get("note")
+    eq_only = await _call(session, {**window, "eventlist": "EQ"})
+    eq_ts = await _call(session, {**window, "eventlist": ["EQ", "TS"]})
+    assert eq_ts["total"] == eq_only["total"], (eq_ts["total"], eq_only["total"])
     print("  [PASS] lists and date range applied")
 
 
@@ -226,32 +238,42 @@ async def test_paging(session: ClientSession) -> None:
     assert parsed["truncated"] is True
     assert parsed["total"] > 150, "total should count every match across pages, not only the listed events"
     assert sum(parsed["summary"]["by_alert_level"].values()) == parsed["total"]
-    assert parsed["summary"]["covers"] == f"all {parsed['total']} matches", parsed["summary"]["covers"]
+    assert parsed["total"] == 449, f"December 2024 had 449 Green earthquakes, got {parsed['total']}"
+    assert parsed["summary"]["covers"].startswith(f"all {parsed['total']} matches"), parsed["summary"]["covers"]
 
-    # A year of Green earthquakes is far more than 500: the summary must say
-    # it only covers the newest 500, not claim to count everything.
+    # A year of Green earthquakes is far more than 500: the statistic
+    # endpoint must still count all of them exactly.
     year = await _call(session, {**args, "from_date": "2024-01-01", "max_results": 5})
-    assert year["total_is_lower_bound"] is True, "Expected more than 500 matches"
-    assert "more exist" in year["summary"]["covers"], year["summary"]["covers"]
-    assert "minimums" in year["note"] and "counts all" not in year["note"], year["note"]
+    assert year["total_is_lower_bound"] is False, "Counts should be exact"
+    assert year["total"] > 500, f"Expected more than 500 Green earthquakes in 2024, got {year['total']}"
+    assert sum(year["summary"]["by_alert_level"].values()) == year["total"]
 
-    # Mixed levels over a busy year: Green fills the 500, so the server must
-    # fetch Orange/Red separately and count all of them (2023 includes the
-    # two Red Turkey earthquakes of 6 February).
+    # Mixed levels over a busy year: Green fills the page, so the server must
+    # fetch Orange/Red separately to list them first, and count all of them
+    # (2023 includes the two Red Turkey earthquakes of 6 February).
     all_levels = {"eventlist": "EQ", "alertlevel": ["Green", "Orange", "Red"],
                   "from_date": "2023-01-01", "to_date": "2023-12-31", "max_results": 10}
     mixed = await _call(session, all_levels)
     serious_only = await _call(session, {**all_levels, "alertlevel": ["Orange", "Red"], "max_results": 100})
-    assert mixed["total_is_lower_bound"] is True, "Expected more than 500 matches in 2023"
+    assert mixed["total_is_lower_bound"] is False and mixed["total"] > 500, mixed["total"]
     for level in ("Red", "Orange"):
         assert mixed["summary"]["by_alert_level"].get(level) == serious_only["summary"]["by_alert_level"].get(level), (
             f"{level} count should be complete: {mixed['summary']['by_alert_level']} vs {serious_only['summary']['by_alert_level']}"
         )
-    assert "every Orange and Red" in mixed["summary"]["covers"], mixed["summary"]["covers"]
+    assert mixed["summary"]["covers"].startswith("all "), mixed["summary"]["covers"]
     assert mixed["events"][0]["alert_level"] == "Red", "Red events should be listed first"
 
     small = await _call(session, {**args, "max_results": 5})
     assert len(small["events"]) == 5 and small["truncated"] is True
+
+    # min_severity: earthquakes of magnitude 7 or more only.
+    strong = await _call(session, {"eventlist": "EQ", "alertlevel": ["Green", "Orange", "Red"],
+                                   "from_date": "2024-01-01", "to_date": "2024-12-31", "min_severity": 7})
+    assert strong["events"], strong
+    for e in strong["events"]:
+        magnitude = float(e["severity"].split("Magnitude ")[1].split("M")[0])
+        assert magnitude >= 7, e["severity"]
+    assert strong["total"] == strong["count"] and strong["total"] < 50, "Expected a short, complete list"
 
     complete = await _call(session, {**args, "from_date": "2024-12-30", "max_results": 100})
     assert complete["truncated"] is False and "note" not in complete, "Expected a complete result"
@@ -351,6 +373,8 @@ async def test_invalid_arguments(session: ClientSession) -> None:
         ({"from_date": "2099-01-01"}, "no forecasts"),
         ({"since_days": 7, "from_date": "2024-01-01"}, "not both"),
         ({"since_days": 0}, "since_days must be"),
+        ({"eventlist": "TS"}, "no tsunami"),
+        ({"min_severity": -1}, "min_severity"),
     ]
     for args, expected in cases:
         parsed = await _call(session, args)

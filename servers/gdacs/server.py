@@ -42,11 +42,14 @@ logging.basicConfig(
 )
 
 GDACS_SEARCH_URL = "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH"
+# Same filters as SEARCH (bar severity), but returns exact totals and one
+# short row per matching event, with no paging.
+GDACS_STATISTIC_URL = "https://www.gdacs.org/gdacsapi/api/events/geteventlist/statistic"
 TIMEOUT = 60
 GDACS_USER_AGENT = "DisastersMCPServer"
 GDACS_PAGE_SIZE = 100  # fixed by the API; its pagesize parameter is ignored
 MAX_RESULTS_LIMIT = 100  # events listed; more only invites the agent to pad its answer
-FETCH_LIMIT = 500  # events counted for the summary, per country spelling
+FETCH_LIMIT = 500  # events fetched when the summary has to come from SEARCH
 DEFAULT_MAX_RESULTS = 50
 RETRY_DELAYS = (0.5, 1.5)  # GDACS sometimes fails a valid request once
 MAX_SINCE_DAYS = 3650
@@ -136,6 +139,7 @@ DISPLAY_NAMES: dict[str, str] = {
 }
 
 ALERT_RANK = {"Red": 2, "Orange": 1, "Green": 0}
+SEARCHABLE_TYPES = {"EQ", "TC", "FL", "VO", "WF", "DR"}  # "TS" returns nothing from GDACS
 
 EVENT_TYPE_NAMES = {
     "EQ": "earthquake", "TC": "tropical cyclone", "FL": "flood",
@@ -259,8 +263,45 @@ def _no_results(country: str | None, aliased: bool, included_green: bool, active
     return json.dumps({"error": message})
 
 
-async def _search(
+def _matches_spelling(names: list[str], spellings: list[str]) -> bool:
+    """True if one of the names is exactly one of a country's GDACS spellings."""
+    return bool({_norm(s) for s in spellings} & {_norm(n) for n in names})
+
+
+async def _statistic(
     params: dict[str, Any], searches: list[str | None], spellings: list[str] | None
+) -> list[dict]:
+    """Every matching event as a short row, from GDACS's statistic endpoint.
+
+    One call per country spelling, merged; rows are only type, id, alert
+    level, country text and dates, which is all the summary needs.
+    """
+    rows: list[dict] = []
+    seen: set[tuple] = set()
+    for name in searches:
+        query = {**params, "country": name} if name else params
+        resp = await _http_get(GDACS_STATISTIC_URL, params=query, headers={"User-Agent": GDACS_USER_AGENT})
+        for row in (resp.json().get("details") or []) if resp.text else []:
+            key = (row.get("eventtype"), row.get("eventid"))
+            if key not in seen:
+                seen.add(key)
+                rows.append(row)
+    if spellings:
+        rows = [r for r in rows if _matches_spelling(_country_names(r, every_spelling=True), spellings)]
+    return rows
+
+
+def _row_event(row: dict) -> dict:
+    """A statistic row in the shape _summary reads."""
+    return {
+        "type_name": EVENT_TYPE_NAMES.get(row.get("eventtype"), row.get("eventtype")),
+        "alert_level": (row.get("alertlevel") or "").capitalize(),
+        "countries": _country_names(row),
+    }
+
+
+async def _search(
+    params: dict[str, Any], searches: list[str | None], spellings: list[str] | None, limit: int = FETCH_LIMIT
 ) -> tuple[dict | None, list[dict], bool, int]:
     """Run one search per country spelling and merge the results."""
     first: dict | None = None
@@ -270,7 +311,7 @@ async def _search(
     requests = 0
     for name in searches:
         query = {**params, "country": name} if name else params
-        page_first, page_features, page_more, page_requests = await _fetch(query, FETCH_LIMIT)
+        page_first, page_features, page_more, page_requests = await _fetch(query, limit)
         first = first or page_first
         more = more or page_more
         requests += page_requests
@@ -281,10 +322,9 @@ async def _search(
                 seen.add(key)
                 features.append(feature)
     if spellings:
-        wanted = {_norm(s) for s in spellings}
         features = [
             f for f in features
-            if wanted & {_norm(n) for n in _country_names(f.get("properties", {}), every_spelling=True)}
+            if _matches_spelling(_country_names(f.get("properties", {}), every_spelling=True), spellings)
         ]
     return first, features, more, requests
 
@@ -315,6 +355,7 @@ async def search_gdacs_events(
     from_date: str | None = None,
     to_date: str | None = None,
     active_only: bool = False,
+    min_severity: float | None = None,
     max_results: int = DEFAULT_MAX_RESULTS,
     format: OutputFormat = "compact",
 ) -> str:
@@ -332,6 +373,8 @@ async def search_gdacs_events(
     - "this week", "last few weeks", "recently" -> since_days (7, 21, ...)
     - a fixed past period ("in 2023") -> from_date and to_date
     - "small", "minor", "all", "every" -> alertlevel=["Green", "Orange", "Red"]
+    - "above magnitude 7", "winds over 200 km/h", "fires over 10,000 ha"
+      -> min_severity (with eventlist set to that hazard)
     - "how many" -> read summary and total; do not raise max_results
     - "list every ..." -> keep the default max_results, give the summary
       and say the list is partial if truncated is true
@@ -346,7 +389,9 @@ async def search_gdacs_events(
         - "WF": forest/bush fires
         - "DR": prolonged water shortage events
         - "TC": hurricanes, typhoons, cyclones
-        - "TS": tsunami warnings/events
+        - "TS": tsunami. GDACS's search has no tsunami events, so "TS" on
+          its own returns an error and is ignored in a list. For tsunamis,
+          search earthquakes (EQ) and say tsunami data is not available.
         Leave unset to return all hazard types.
     alertlevel: Severity, or a list of them. "Green" = low impact,
         "Orange" = medium impact, "Red" = high impact/major disaster.
@@ -369,6 +414,10 @@ async def search_gdacs_events(
     active_only: True keeps only events still ongoing (GDACS marks them
         current, or updated them in the last 7 days). Use for "right now",
         "currently", "active".
+    min_severity: Optional minimum severity, in the hazard's own unit:
+        magnitude for EQ (7 = M7.0 and above), maximum wind in km/h for TC,
+        burnt area in hectares for WF. Not meaningful for FL, VO or DR. Set
+        eventlist to the one hazard it applies to.
     max_results: Number of events to list (1-100, default 50), highest alert
         level first, then newest.
         Values above 100 are lowered to 100. The summary counts every match
@@ -383,12 +432,13 @@ async def search_gdacs_events(
           it if it changes the answer (e.g. retry with Green included), and
           tell the user what it says
         - retrieved_at: today's date (UTC)
-        - total: events matching the query; total_is_lower_bound=true means
-          GDACS has more than were counted
-        - summary: counts by type, alert level and country. covers says
-          what it counts. When more than 500 events match, every Orange and
-          Red event is still fetched and counted; only Green counts (and
-          the total) are then minimums
+        - total: events matching the query. Exact, except with active_only
+          or min_severity when more than 500 match: then
+          total_is_lower_bound is true
+        - summary: counts by type, alert level and top countries, across
+          every match (not only the listed events). covers says what it
+          counts; with total_is_lower_bound, Orange and Red counts are still
+          complete and only Green counts are minimums
         - count, truncated: how many events are listed, and whether that is
           fewer than total. A truncated list is partial: say so.
         - events: highest alert level first (Red, Orange, Green), then
@@ -427,14 +477,33 @@ async def search_gdacs_events(
             "error": f"from_date {start} is after today ({today.isoformat()}). GDACS has no "
             "forecasts, only events that have already started."
         })
+    if min_severity is not None and min_severity < 0:
+        return json.dumps({"error": "min_severity must be 0 or more."})
+
+    # GDACS's search returns nothing for "TS", and a list containing it
+    # corrupts the rest ("EQ;TS" gives a small subset of earthquakes,
+    # "FL;TS" gives nothing). Drop it, and send no filter when every
+    # searchable type is asked for.
+    types = list(dict.fromkeys([eventlist] if isinstance(eventlist, str) else eventlist or []))
+    dropped_tsunami = "TS" in types
+    types = [t for t in types if t != "TS"]
+    if dropped_tsunami and not types:
+        return json.dumps({
+            "error": "GDACS's event search has no tsunami (TS) events, so tsunamis cannot be "
+            "searched with this tool. Search earthquakes (eventlist='EQ') instead, and tell "
+            "the user that tsunami data is not available here."
+        })
+    if set(types) >= SEARCHABLE_TYPES:
+        types = []
 
     params = {
-        "eventlist": _join(eventlist),
+        "eventlist": _join(types),
         "alertlevel": _join(alertlevel),
         "fromDate": start,
         "toDate": end,
+        "severity": min_severity,
     }
-    params = {k: v for k, v in params.items() if v}
+    params = {k: v for k, v in params.items() if v is not None and v != ""}
 
     spellings = COUNTRY_ALIASES.get(_norm(country)) if country else None
     searches: list[str | None] = spellings or [country]
@@ -448,25 +517,32 @@ async def search_gdacs_events(
             pairs = [(f, e) for f, e in pairs if e["is_current"] or (e["to_date"] or "") >= cutoff]
         return pairs
 
+    # The summary comes from GDACS's statistic endpoint, which counts every
+    # match exactly. It has no severity filter and no "current" flag, so with
+    # min_severity or active_only the summary is built from SEARCH instead.
+    exact_summary = min_severity is None and not active_only
+
     fell_back_to_green = False
+    stats: list[dict] | None = None
     try:
-        first, features, more, requests = await _search(params, searches, spellings)
+        limit = max_results if exact_summary else FETCH_LIMIT
+        first, features, more, requests = await _search(params, searches, spellings, limit)
         pairs = keep(features)
+        used = params
         if not pairs and alertlevel is None:
             # GDACS leaves Green out by default; an agent asking "any
             # earthquakes on 31 December?" wants the Green ones too. Checked
             # after the active_only filter: Orange/Red events that have all
             # ended must not stop the search for active Green ones.
-            first, features, more, requests = await _search(
-                {**params, "alertlevel": "Green"}, searches, spellings
-            )
+            used = {**params, "alertlevel": "Green"}
+            first, features, more, requests = await _search(used, searches, spellings, limit)
             pairs = keep(features)
             fell_back_to_green = bool(pairs)
 
         # Green events far outnumber the rest, so when a search that includes
-        # Green hits the fetch limit, the serious events are the first to be
-        # cut. Fetch Orange/Red separately (a small, complete set) and merge
-        # them in, so they are never missing from the events or the summary.
+        # Green fills the page, the serious events are the first to be cut.
+        # Fetch Orange/Red separately (a small, complete set) and merge them
+        # in, so they always head the list.
         levels = set([alertlevel] if isinstance(alertlevel, str) else alertlevel or [])
         serious = sorted(levels & {"Orange", "Red"})
         serious_complete = False
@@ -481,6 +557,12 @@ async def search_gdacs_events(
     except Exception as exc:
         return json.dumps({"error": f"Disaster search failed: {exc}"})
 
+    if exact_summary and pairs:
+        try:
+            stats = await _statistic(used, searches, spellings)
+        except Exception:
+            stats = None  # fall back to counting what SEARCH returned
+
     # Highest alert level first, then newest: agents take "key events" from
     # the top of the list.
     pairs.sort(key=lambda p: (ALERT_RANK.get(p[1]["alert_level"], 0), p[1]["from_date"] or ""), reverse=True)
@@ -491,28 +573,37 @@ async def search_gdacs_events(
         )
         return _no_results(country, bool(spellings), included_green, active_only)
 
-    total = len(pairs)
-    count = min(total, max_results)
-    truncated = more or total > max_results
-    summary = _summary([e for _, e in pairs])
-    if not more:
-        summary["covers"] = f"all {total} matches"
-    elif serious_complete:
-        summary["covers"] = (
-            f"the newest {FETCH_LIMIT} events plus every Orange and Red match: "
-            "Orange and Red counts are complete, Green counts are minimums"
-        )
+    count = min(len(pairs), max_results)
+    if stats:
+        total = max(len(stats), len(pairs))
+        lower_bound = False
+        summary = _summary([_row_event(r) for r in stats])
+        summary["covers"] = f"all {total} matches (exact counts from GDACS statistics)"
     else:
-        summary["covers"] = f"the newest {FETCH_LIMIT} events only; more exist"
+        total = len(pairs)
+        lower_bound = more
+        summary = _summary([e for _, e in pairs])
+        if not more:
+            summary["covers"] = f"all {total} matches"
+        elif serious_complete:
+            summary["covers"] = (
+                f"the newest {FETCH_LIMIT} events plus every Orange and Red match: "
+                "Orange and Red counts are complete, Green counts are minimums"
+            )
+        else:
+            summary["covers"] = f"the newest {FETCH_LIMIT} events only; more exist"
+    truncated = lower_bound or total > count
     meta: dict[str, Any] = {
         "retrieved_at": today.isoformat(),
         "total": total,
-        "total_is_lower_bound": more,
+        "total_is_lower_bound": lower_bound,
         "summary": summary,
         "count": count,
         "truncated": truncated,
     }
     notes = []
+    if dropped_tsunami:
+        notes.append("Tsunamis (TS) cannot be searched in GDACS and were left out; tell the user.")
     if capped:
         notes.append(f"max_results was lowered to the limit of {MAX_RESULTS_LIMIT}.")
     if fell_back_to_green:
@@ -522,19 +613,18 @@ async def search_gdacs_events(
             "Green (low-impact) events are not included; pass "
             "alertlevel=['Green', 'Orange', 'Red'] to include them."
         )
-    if more and serious_complete:
+    if lower_bound and serious_complete:
         notes.append(
             f"Listing {count} of at least {total} matching events, highest alert level first. "
             f"Every Orange and Red event is included and counted, but only the newest "
             f"{FETCH_LIMIT} events were checked for Green, so Green counts and the total are "
-            "minimums. For exact Green counts, split the period into smaller date windows."
+            "minimums."
         )
-    elif more:
+    elif lower_bound:
         notes.append(
             f"Listing {count} of at least {total} matching events. Only the newest "
             f"{FETCH_LIMIT} events were checked, so the summary counts are minimums and older "
-            "events may be missing. For exact counts or rankings, split the period into "
-            "smaller date windows."
+            "events may be missing. For exact counts, narrow the date range."
         )
     elif truncated:
         notes.append(
