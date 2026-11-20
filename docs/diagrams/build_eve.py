@@ -287,32 +287,34 @@ def progressive_discovery() -> Canvas:
     return c
 
 
-def image_transmission() -> Canvas:
-    """How a picture leaves a tool and reaches the EVE chat (section 3.5).
+def file_model_view() -> Canvas:
+    """What each hop sends for a returned file (section 3.5).
 
-    Source: backend ArtifactInterceptor and docs/mcp-file-return-convention.md.
-    A small image is ImageContent. A larger file is a ResourceLink, then resources/read.
-    Both are stored as an artifact. The model receives a stub, not the bytes.
+    Source: servers/effis/eve_mcp_runtime/files.py (_strip, _file_block) and backend
+    artifact_ingestion.py (_fold_output_paths, _stub_text).
     """
     c = new()
-    tool = c.node(290, 20, "Tool returns\na picture", w=220, h=72, role="terminal")
-    kind = c.node(290, 150, "Small image\nor larger file?", w=220, h=84, role="decision")
-    inline = c.node(20, 340, "ImageContent\nbase64 PNG", w=200, h=78)
-    link = c.node(300, 340, "ResourceLink\nURI only", w=200, h=78)
-    read = c.node(580, 340, "EVE calls\nresources/read", w=200, h=78, role="slate")
-    store = c.node(290, 520, "Stored as\nan artifact", w=220, h=78, role="slate")
-    stub = c.node(290, 670, "Bytes replaced\nby a short stub", w=220, h=78)
-    chat = c.node(20, 860, "Chat shows\nthe image", w=200, h=78, role="terminal")
-    model = c.node(560, 860, "Model sees\nthe stub", w=220, h=78, role="slate")
-    c.arrow(tool, "bottom", kind, "top")
-    c.arrow(kind, "left", inline, "top", label="small", via=[(inline.cx, kind.cy)])
-    c.arrow(kind, "bottom", link, "top", label="larger")
-    c.arrow(link, "right", read, "left")
-    c.arrow(inline, "bottom", store, "top", db=-50, via=[(inline.cx, 470), (store.cx - 50, 470)])
-    c.arrow(read, "bottom", store, "top", db=50, via=[(read.cx, 470), (store.cx + 50, 470)])
-    c.arrow(store, "bottom", stub, "top")
-    c.arrow(stub, "bottom", chat, "top", da=-50, via=[(stub.cx - 50, 810), (chat.cx, 810)])
-    c.arrow(stub, "bottom", model, "top", da=50, via=[(stub.cx + 50, 810), (model.cx, 810)])
+    c.cluster(20, 20, 1180, 250, "The result has an object with path: EFFIS", header=True)
+    tool = c.code(40, 90, '{"files": [{\n  "name": "severity_map.png",\n  "path": "/tmp/effis/severity_map.png",\n'
+                          '  "bytes": 48213}]}', w=330)
+    launch = c.code(430, 90, '{"files": [{\n  "name": "severity_map.png",\n  "path": "severity_map.png",\n'
+                             '  "bytes": 48213}]}', w=290)
+    model = c.code(820, 90, '{"files": [{\n  "name": "severity_map.png",\n  "path": "/artifacts/{id}/severity_map.png",\n'
+                            '  "bytes": 48213}]}', w=360)
+    c.note_under(tool, "Tool returns", gap=12)
+    c.note_under(launch, "Launcher sends, plus the PNG bytes", gap=12)
+    c.note_under(model, "Agent sees", gap=12)
+    c.arrow(tool, "right", launch, "left")
+    c.arrow(launch, "right", model, "left")
+
+    c.cluster(20, 310, 1180, 230, "The result has no object with path: dummy_image", header=True)
+    img = c.code(40, 380, "ImageContent\n  mimeType: image/png\n  data: <base64>", w=330)
+    stub = c.code(450, 380, '![get_sample_image-1.png](/artifacts/{id} "MCP: dummy_image/get_sample_image")\n'
+                            '{"artifact_id": "{id}", "content_type": "image/png",\n'
+                            ' "filename": "get_sample_image-1.png", "size_bytes": <size>}', w=730)
+    c.note_under(img, "Tool returns", gap=12)
+    c.note_under(stub, "Agent sees a stub", gap=12)
+    c.arrow(img, "right", stub, "left")
     return c
 
 
@@ -355,7 +357,7 @@ FLOWS = {
     "react-loop": react_loop,
     "progressive-discovery": progressive_discovery,
     "programmatic-tool-calling": programmatic_tool_calling,
-    "image-transmission": image_transmission,
+    "file-model-view": file_model_view,
 }
 SEQUENCES = ["elicitation", "primitives-together", "react-evia-trace", "resource-link", "state-handles"]
 
@@ -379,7 +381,7 @@ EVE_ONLY = [
     "server-folder",
     "credentials",
     "react-evia-trace",
-    "image-transmission",
+    "file-model-view",
 ]
 
 
