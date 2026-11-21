@@ -1,0 +1,7 @@
+# mcp pinned to the registry's version (the API changes in 2.x)
+mcp[cli]==1.27.0
+httpx>=0.27.0          # CelesTrak, ESA plan pages and KMLs, Open-Meteo
+numpy>=1.26,<3
+shapely>=2.0,<3        # footprints, AOI intersection, antimeridian handling
+skyfield>=1.48,<2      # SGP4 propagation (built-in leap-second table: no downloads)
+sgp4>=2.23,<3          # SGP4 propagator used by skyfield (newer minimum than skyfield requires)
