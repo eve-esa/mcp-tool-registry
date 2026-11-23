@@ -129,9 +129,14 @@ jobs:
           else
             DOCKERFILE="shared/Dockerfile"
           fi
+          EXTRA=()
+          if grep -q -- '--from=runtime' "$DOCKERFILE"; then
+            EXTRA+=(--build-context runtime=shared)
+          fi
           docker buildx build \
             --platform linux/amd64 \
             -f "$DOCKERFILE" \
+            "${EXTRA[@]}" \
             "servers/${{ matrix.server }}"
 
   # ─── Require maintainer approval when shared infra is touched ─────────

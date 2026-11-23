@@ -290,7 +290,7 @@ def progressive_discovery() -> Canvas:
 def file_model_view() -> Canvas:
     """What each hop sends for a returned file (section 3.5).
 
-    Source: servers/effis/eve_mcp_runtime/files.py (_strip, _file_block) and backend
+    Source: shared/eve_mcp_runtime/files.py (_strip, _file_block) and backend
     artifact_ingestion.py (_fold_output_paths, _stub_text).
     """
     c = new()
