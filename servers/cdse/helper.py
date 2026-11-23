@@ -21,6 +21,7 @@ DEM                 → "dem"
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import logging
 import os
@@ -44,6 +45,32 @@ _ENV_PATH = _SERVER_DIR / ".env"
 load_dotenv(_ENV_PATH, override=False)
 
 _PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
+
+# Same role as the EFFIS save directory: every image has a filesystem path.
+# EVE folds the image stub into a JSON object that already has `path`.
+_SAVE_DIR = Path(os.getenv("CDSE_SAVE_DIR", "/tmp/cdse_images"))
+
+
+def _image_file(
+    *,
+    collection_type: str,
+    bbox: list[float],
+    start_date: str,
+    end_date: str,
+    width: int,
+    height: int,
+) -> Path:
+    """Stable JPEG name under ``CDSE_SAVE_DIR``."""
+    digest = hashlib.sha1(
+        f"{collection_type}|{bbox}|{start_date}|{end_date}|{width}|{height}".encode()
+    ).hexdigest()[:8]
+    return _SAVE_DIR / f"{collection_type}_{start_date}_{end_date}_{digest}.jpg"
+
+
+def _write_image(path: Path, image_bytes: bytes) -> tuple[str, int]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(image_bytes)
+    return str(path.resolve()), len(image_bytes)
 
 def _get_token() -> str:
 
@@ -73,14 +100,13 @@ def _fetch(
     height: int = 512,
     data_filter_extra: dict | None = None,
     processing_options: dict | None = None,
-    save_path: str | None = None
 ) -> dict:
     """
     Low-level POST to the Sentinel Hub Process API.
 
     Returns a dict with keys:
         image_b64, media_type, width, height, collection,
-        evalscript, saved_path
+        evalscript, path, size_bytes
     """
     data_filter: dict = {
         "timeRange": {
@@ -151,15 +177,18 @@ def _fetch(
     except Exception:
         pass
 
-    # Optionally save to disk
-    saved_path: str | None = None
-    if save_path:
-        import pathlib
-        p = pathlib.Path(save_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(image_bytes)
-        saved_path = str(p.resolve())
-        logger.info("Saved to %s", saved_path)
+    image_path, size_bytes = _write_image(
+        _image_file(
+            collection_type=collection_type,
+            bbox=bbox,
+            start_date=start_date,
+            end_date=end_date,
+            width=width,
+            height=height,
+        ),
+        image_bytes,
+    )
+    logger.info("Saved to %s", image_path)
 
     return {
         "image_b64": base64.b64encode(image_bytes).decode("ascii"),
@@ -168,7 +197,8 @@ def _fetch(
         "height": actual_h,
         "collection": collection_type,
         "evalscript": str(body),
-        "saved_path": saved_path,
+        "path": image_path,
+        "size_bytes": size_bytes,
     }
 
 def validate_bands(query_bands: list[str], true_bands: list[str]) -> bool:
@@ -255,7 +285,6 @@ def fetch_sentinel1_grd(
     resolution: str | None = None,        # "HIGH" | "MEDIUM"
     width: int = 512,
     height: int = 512,
-    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-1 GRD image from the Sentinel Hub Process API.
@@ -329,7 +358,6 @@ def fetch_sentinel1_grd(
         height=height,
         data_filter_extra=df_extra or None,
         processing_options=proc,
-        save_path=save_path
     )
 
 
@@ -376,7 +404,6 @@ def fectch_sentinel2(
     harmonize_values: bool = False,
     width: int = 512,
     height: int = 512,
-    save_path: str | None = None
 ) -> dict:
 
     """
@@ -425,7 +452,6 @@ def fectch_sentinel2(
         height=height,
         data_filter_extra=df_extra,
         processing_options=proc,
-        save_path=save_path
     )
 
 
@@ -476,7 +502,6 @@ def fetch_sentinel3_olci(
     evalscript: str | None = None,
     width: int = 512,
     height: int = 512,
-    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-3 OLCI (Ocean and Land Colour Instrument) image.
@@ -518,7 +543,6 @@ def fetch_sentinel3_olci(
         end_date=end_date,
         width=width,
         height=height,
-        save_path=save_path
     )
 
 
@@ -568,7 +592,6 @@ def fetch_sentinel3_slstr(
     evalscript: str | None = None,
     width: int = 512,
     height: int = 512,
-    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-3 SLSTR (Sea and Land Surface Temperature Radiometer) image.
@@ -608,7 +631,6 @@ def fetch_sentinel3_slstr(
         end_date=end_date,
         width=width,
         height=height,
-        save_path=save_path
     )
 
 
@@ -643,7 +665,6 @@ def fetch_sentinel3_syn_l2(
     evalscript: str | None = None,
     width: int = 512,
     height: int = 512,
-    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-3 SYN L2 (Synergy OLCI+SLSTR combined) image.
@@ -685,7 +706,6 @@ def fetch_sentinel3_syn_l2(
         end_date=end_date,
         width=width,
         height=height,
-        save_path=save_path
     )
 
 def _es_custom_bands(bands: list[str], gain: float = 2.5) -> str:
@@ -762,7 +782,6 @@ def fetch_sentinel5p_l2(
     evalscript: str | None = None,
     width: int = 512,
     height: int = 512,
-    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Sentinel-5P L2 trace-gas product.
@@ -807,7 +826,6 @@ def fetch_sentinel5p_l2(
         end_date=end_date,
         width=width,
         height=height,
-        save_path=save_path
     )
 
 
@@ -830,7 +848,6 @@ def fetch_landsat_ot_l1(
     mosaicking_order: str = "leastCC",
     width: int = 512,
     height: int = 512,
-    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Landsat 8/9 OLI-TIRS L1 image (~30 m resolution).
@@ -874,7 +891,6 @@ def fetch_landsat_ot_l1(
         width=width,
         height=height,
         data_filter_extra=df_extra,
-        save_path=save_path
     )
 
 
@@ -914,7 +930,6 @@ def fetch_dem(
     dem_instance: str = "COPERNICUS_30", # COPERNICUS_30 | COPERNICUS_90 | MAPZEN
     width: int = 512,
     height: int = 512,
-    save_path: str | None = None
 ) -> dict:
     """
     Fetch a Digital Elevation Model image.
@@ -966,5 +981,4 @@ def fetch_dem(
         width=width,
         height=height,
         processing_options=proc,
-        save_path=save_path
     )

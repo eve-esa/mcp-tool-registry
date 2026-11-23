@@ -15,10 +15,9 @@ Or via stdio transport (for use in MCP clients / Claude Desktop):
     }
 
 Each tool returns:
-  - An ImageContent block containing the JPEG as base64 (for MCP clients
-    that can render images)
-  - A TextContent block with a JSON metadata summary (saved_path, dims,
-    collection, evalscript used)
+  - An ImageContent block containing the JPEG as base64
+  - A TextContent block with JSON that names the file as ``path`` and
+    ``size_bytes``, so EVE can store the image and drop the stub
 """
 
 from __future__ import annotations
@@ -56,9 +55,11 @@ mcp = FastMCP(
 
 def _to_content(result: dict) -> list[ImageContent | TextContent]:
     """
-    Convert a sentinel_hub fetch result dict into MCP content blocks:
-    1. ImageContent  – the JPEG image as base64
-    2. TextContent   – JSON metadata (dimensions, collection, saved_path, evalscript)
+    Convert a fetch result into MCP content blocks.
+
+    The image stays inline so EVE can store it. The JSON uses ``path`` and
+    ``size_bytes``, the same keys as an EFFIS image record. The artifact
+    middleware writes the sandbox path into ``path`` and drops the stub.
     """
     image_block = ImageContent(
         type="image",
@@ -66,11 +67,11 @@ def _to_content(result: dict) -> list[ImageContent | TextContent]:
         mimeType=result["media_type"],
     )
     meta = {
-        "collection":  result["collection"],
-        "width_px":    result["width"],
-        "height_px":   result["height"],
-        "saved_path":  result["saved_path"],
-        "evalscript":  result["evalscript"],
+        "collection": result["collection"],
+        "width_px": result["width"],
+        "height_px": result["height"],
+        "path": result["path"],
+        "size_bytes": result["size_bytes"],
     }
     text_block = TextContent(
         type="text",
@@ -135,7 +136,6 @@ def tool_sentinel1_grd(
     resolution: Annotated[str | None, "HIGH | MEDIUM"] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel1_grd(
         bbox=bbox,
@@ -153,7 +153,6 @@ def tool_sentinel1_grd(
         resolution=resolution,
         width=width,
         height=height,
-        save_path=save_path
     )
     return _to_content(result)
 
@@ -198,7 +197,6 @@ def tool_sentinel2(
     ] = False,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fectch_sentinel2(
         bbox=bbox,
@@ -213,7 +211,6 @@ def tool_sentinel2(
         harmonize_values=harmonize_values,
         width=width,
         height=height,
-        save_path=save_path,
     )
     return _to_content(result)
 
@@ -248,7 +245,6 @@ def tool_sentinel3_olci(
     evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel3_olci(
         bbox=bbox,
@@ -259,7 +255,6 @@ def tool_sentinel3_olci(
         evalscript=evalscript,
         width=width,
         height=height,
-        save_path=save_path,
     )
     return _to_content(result)
 
@@ -295,7 +290,6 @@ def tool_sentinel3_slstr(
     evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel3_slstr(
         bbox=bbox,
@@ -306,7 +300,6 @@ def tool_sentinel3_slstr(
         evalscript=evalscript,
         width=width,
         height=height,
-        save_path=save_path,
     )
     return _to_content(result)
 
@@ -339,7 +332,6 @@ def tool_sentinel3_syn_l2(
     evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel3_syn_l2(
         bbox=bbox,
@@ -350,7 +342,6 @@ def tool_sentinel3_syn_l2(
         evalscript=evalscript,
         width=width,
         height=height,
-        save_path=save_path,
     )
     return _to_content(result)
 
@@ -384,7 +375,6 @@ def tool_sentinel5p_l2(
     evalscript: Annotated[str | None, "Raw evalscript. Overrides everything."] = None,
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_sentinel5p_l2(
         bbox=bbox,
@@ -395,7 +385,6 @@ def tool_sentinel5p_l2(
         evalscript=evalscript,
         width=width,
         height=height,
-        save_path=save_path,
     )
     return _to_content(result)
 
@@ -436,7 +425,6 @@ def tool_landsat_ot_l1(
     ] = "leastCC",
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_landsat_ot_l1(
         bbox=bbox,
@@ -449,7 +437,6 @@ def tool_landsat_ot_l1(
         mosaicking_order=mosaicking_order,
         width=width,
         height=height,
-        save_path=save_path,
     )
     return _to_content(result)
 
@@ -486,7 +473,6 @@ def tool_dem(
     end_date: Annotated[str, "Ignored by DEM but required by API (YYYY-MM-DD)"] = "2020-12-31",
     width: Annotated[int, "Output image width in pixels"] = 512,
     height: Annotated[int, "Output image height in pixels"] = 512,
-    save_path: Annotated[str | None, "Local file path to save the JPEG"] = None,
 ) -> list[ImageContent | TextContent]:
     result = fetch_dem(
         bbox=bbox,
@@ -498,7 +484,6 @@ def tool_dem(
         dem_instance=dem_instance,
         width=width,
         height=height,
-        save_path=save_path,
     )
     return _to_content(result)
 
