@@ -127,6 +127,8 @@ def build_and_push_image(
         "-t",
         image_uri,
     ]
+    if "--from=runtime" in Path(dockerfile).read_text(encoding="utf-8"):
+        build_cmd.extend(["--build-context", "runtime=shared"])
     if image_tag != "latest":
         build_cmd.extend(["-t", latest_uri])
     build_cmd.extend(["--load", build_context])

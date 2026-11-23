@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # EFFIS MCP image: same layout as ../../shared/Dockerfile, plus the EFFIS
 # ``modis.ba.poly`` shapefile fetched at *build* time into ``effis_layer/``
 # (historical date queries in ``server.py`` use this cache; no runtime download).
@@ -15,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Includes .env when the deploy workflow has replaced the .env.template
 # placeholders. .dockerignore must not exclude that file.
 COPY . .
+COPY --from=runtime eve_mcp_runtime /app/eve_mcp_runtime
 
 # ~200 MiB compressed from EFFIS WFS; allow up to 30 min on slow links / emulated ARM builds.
 # Prefer verified HTTPS. The wildcard cert (*.effis.emergency.copernicus.eu,

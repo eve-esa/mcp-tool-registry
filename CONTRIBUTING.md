@@ -283,7 +283,7 @@ curl http://localhost:8000/mcp
 
 ```bash
 # From the repository root
-docker build -f shared/Dockerfile servers/my-server/
+docker buildx build -f shared/Dockerfile --build-context runtime=shared servers/my-server/
 ```
 
 This uses the same Dockerfile that CI uses. If it builds locally, it will build in CI.
@@ -521,6 +521,6 @@ Copy this checklist into your PR description:
 - [ ] `.env.template` uses `${PLACEHOLDER}` syntax for secrets (if applicable)
 - [ ] No files larger than 5 MB
 - [ ] Local test passes (`python test.py` or manual curl test)
-- [ ] Docker build succeeds (`docker build -f shared/Dockerfile servers/my-server/`)
+- [ ] Docker build succeeds (`docker buildx build -f shared/Dockerfile --build-context runtime=shared servers/my-server/`)
 - [ ] If server uses credential headers, added header allowlist to `scripts/deploy_server.py`
 ```

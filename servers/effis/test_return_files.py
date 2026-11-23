@@ -23,6 +23,7 @@ from PIL import Image
 
 SERVER_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SERVER_DIR))
+sys.path.insert(0, str(SERVER_DIR.parents[1] / "shared"))
 
 from eve_mcp_runtime.files import OutputFilesMiddleware  # noqa: E402
 
