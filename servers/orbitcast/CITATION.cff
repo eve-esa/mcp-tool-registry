@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: If you use this MCP server, please cite it using the metadata from this file.
+type: software
+title: OrbitCast MCP Server
+abstract: >-
+  MCP server that forecasts future Earth-observation acquisitions. It predicts
+  when Sentinel-1, Sentinel-2, Landsat 8/9 or any user-added satellite will
+  image an area, whether ESA's published acquisition plan confirms the image,
+  whether an optical image is likely to be cloud-free, when the product can be
+  downloaded, and which areas will be imaged in a time window. It uses open
+  data only: CelesTrak orbital elements propagated with SGP4, ESA Sentinel-1
+  and Sentinel-2 acquisition-plan KML files, and the Open-Meteo cloud-cover
+  forecast. No credentials are required.
+authors:
+  - given-names: Cristopher
+    family-names: Castro Traba
+    alias: CristopherCastro
+keywords:
+  - mcp
+  - earth-observation
+  - acquisition-planning
+  - orbit-prediction
+  - sentinel-1
+  - sentinel-2
+  - landsat
+  - cloud-forecast
+license: Apache-2.0
+repository-code: https://github.com/eve-esa/mcp-tool-registry/tree/main/servers/orbitcast
