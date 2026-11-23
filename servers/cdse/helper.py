@@ -26,16 +26,26 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Optional
-from oauthlib.oauth2 import BackendApplicationClient
-from requests_oauthlib import OAuth2Session
 
 import requests
+from dotenv import load_dotenv
+from oauthlib.oauth2 import BackendApplicationClient
+from requests_oauthlib import OAuth2Session
 
 logger = logging.getLogger(__name__)
 
 import os, requests
 
+# ---------------------------------------------------------------------------
+# Load .env (same directory as this file) before reading configuration
+# ---------------------------------------------------------------------------
+
+_SERVER_DIR = Path(__file__).resolve().parent
+_ENV_PATH = _SERVER_DIR / ".env"
+# Do not override variables already set in the process (e.g. Cursor MCP envFile).
+load_dotenv(_ENV_PATH, override=False)
 
 _PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
 
