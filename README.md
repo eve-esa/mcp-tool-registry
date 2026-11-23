@@ -37,7 +37,7 @@ Anyone building EO agents can run these servers locally or contribute a new one.
 | [`eotdl`](servers/eotdl) | Search datasets, models and pipelines on the EO Training Data Lab | `eotdl_search` | none |
 | [`esa_moocs`](servers/esa_moocs) | Semantic search over ESA Earth Observation MOOC transcripts | `search_moocs` | none |
 | [`eve_retrieval`](servers/eve_retrieval) | Retrieval over the EVE document collections | `retrieve` | EVE token |
-| [`gdacs`](servers/gdacs) | Ongoing and recent natural disasters worldwide (GDACS, UN / EC) | `search_gdacs_events` | none |
+| [`gdacs`](servers/gdacs) | Current and past natural disasters worldwide (GDACS, UN / EC) | `search_gdacs_events` | none |
 | [`geocode`](servers/geocode) | Forward and reverse geocoding with OpenStreetMap Nominatim | `geocode_place`, `reverse_geocode_place` | none |
 | [`serpapi`](servers/serpapi) | Web search through SerpAPI | `search_google` | SerpAPI key |
 | [`trallie`](servers/trallie) | Structured data extraction from documents with an LLM | `extract_data` | Groq API key |

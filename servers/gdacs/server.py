@@ -5,11 +5,13 @@ An MCP server providing global natural disaster and hazard monitoring
 via GDACS (Global Disaster Alert and Coordination System), a joint
 initiative of the UN and European Commission. Use to search for
 natural disaster events worldwide covering earthquakes, floods,
-volcanoes, wildfires, droughts, cyclones and tsunamis.
+volcanoes, wildfires, droughts and tropical cyclones (GDACS's search
+has no tsunami events).
 
 Tools:
-    search_gdacs_events — search disasters by hazard type, alert level,
-                        country and date range
+    search_gdacs_events — search disasters by hazard, alert level, place
+                        (country, region, sea or area), event name and
+                        date range
 
 Usage:
     python server.py                              # stdio transport
