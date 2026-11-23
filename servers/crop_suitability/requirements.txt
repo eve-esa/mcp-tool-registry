@@ -1,0 +1,13 @@
+# mcp is pinned: 2.x dropped the vendored mcp.server.fastmcp module that server.py imports.
+mcp[cli]==1.27.0
+httpx>=0.28.1
+python-dotenv>=1.0.0
+numpy>=2.1.0
+xarray>=2025.1.0
+pystac-client>=0.8.5
+odc-stac>=0.4.0
+odc-geo>=0.4.10
+rasterio>=1.4.3
+shapely>=2.0.6
+dask>=2025.1.0
+matplotlib>=3.9.0
