@@ -86,39 +86,58 @@ def participants() -> Canvas:
 def registry_lifecycle() -> Canvas:
     c = new()
     w, h = 190, 84
-    xs = [40, 290, 540, 790]
-    y1, y2 = 70, 360
+    # One teal for every step. Dark only for the entry and the exit.
+    xs = [40, 310, 580, 850]
+    y1, y_rev, y2 = 70, 248, 400
     dev = c.node(xs[0], y1, "servers/your-server/", w=w, h=h, role="terminal")
     pr = c.node(xs[1], y1, "Pull request\nagainst main", w=w, h=h)
-    chk = c.node(xs[2], y1, "PR checks", w=w, h=h, role="decision")
-    rev = c.node(xs[3], y1, "Code review", w=w, h=h, role="decision")
-    merge = c.node(xs[3], y2, "Merge to main", w=w, h=h)
-    run = c.node(xs[2], y2, "Server runs", w=w, h=h)
-    stage = c.node(xs[1], y2, "Staging test", w=w, h=h)
+    chk = c.node(xs[2], y1, "PR checks", w=w, h=h)
+    # Scope gate before code review. Same column, so the pass drops straight down.
+    dom = c.node(xs[3], y1, "Domain review\nEO, related science", w=w, h=h)
+    rev = c.node(xs[3], y_rev, "Code review", w=w, h=h)
+    # Merge and the running server are one step.
+    live = c.node(xs[3], y2, "Merge to main\nServer runs", w=w, h=h)
+    stage = c.node(xs[2], y2, "Staging test", w=w, h=h)
+    # Final gate. Same column as the pull request, so a denial goes straight back up.
+    lab = c.node(xs[1], y2, "ESA \u03a6-lab\nFinal approval", w=w, h=h)
     public = c.node(xs[0], y2, "Public in EVE", w=w, h=h, role="terminal")
     c.note_under(dev, "server.py, requirements.txt,\nCITATION.cff")
     c.note_under(chk, "pr-checks.yml")
-    c.note_under(run, "deployed and running")
+    c.note_under(live, "deployed and running")
     c.note_under(public, "tools/list shows it")
-    # A person on the top edge: these two steps are done by a human.
-    for step in (rev, stage):
-        pw, ph = 34, 40
+    pw, ph = 34, 40
+    # People on the top edge. Code review's icon sits on the right so the pass arrow can land in the centre.
+    for step in (dom, stage, lab):
         c.person(step.cx - pw / 2, step.y - ph + 14, w=pw, h=ph)
+    c.person(rev.x + rev.w - pw, rev.y - ph + 10, w=pw, h=ph)
     c.arrow(dev, "right", pr, "left")
     c.arrow(pr, "right", chk, "left")
-    c.arrow(chk, "right", rev, "left", label="pass")
-    c.arrow(chk, "top", dev, "top", via=[(chk.cx, 28), (dev.cx, 28)], label="fail")
-    # A rejection is an error back to the same pull request, under the top row.
-    gutter = 248
+    c.arrow(chk, "right", dom, "left", label="pass")
+    c.arrow(chk, "top", dev, "top", kind="error", via=[(chk.cx, 28), (dev.cx, 28)], label="fail")
+    c.arrow(dom, "bottom", rev, "top", label="pass")
+    # Out of scope returns to the pull request. Another topic is not revised, it is refused.
+    scope_y = 228
     c.arrow(
-        rev, "bottom", pr, "bottom", kind="error", label="reject",
-        da=-78, db=70,
-        via=[(rev.cx - 78, gutter), (pr.cx + 70, gutter)],
+        dom, "bottom", pr, "bottom", kind="error", label="out of scope",
+        da=-75, db=65,
+        via=[(dom.cx - 75, scope_y), (pr.cx + 65, scope_y)],
     )
-    c.arrow(rev, "bottom", merge, "top", label="pass")
-    c.arrow(merge, "left", run, "right")
-    c.arrow(run, "left", stage, "right")
-    c.arrow(stage, "left", public, "right")
+    # A code rejection is an error back to the same pull request.
+    c.arrow(
+        rev, "left", pr, "bottom", kind="error", label="reject",
+        via=[(pr.cx, rev.cy)],
+    )
+    c.arrow(rev, "bottom", live, "top", label="pass")
+    c.arrow(live, "left", stage, "right")
+    c.arrow(stage, "left", lab, "right")
+    c.arrow(lab, "left", public, "right", label="approve")
+    # A denial sends the whole contribution back to the pull request. The label sits on the lower half, clear of the other returns.
+    deny_x = lab.cx - 90
+    c.arrow(
+        lab, "top", pr, "bottom", kind="error", label="deny",
+        da=-90, db=-90,
+        via=[(deny_x, 250)],
+    )
     return c
 
 
