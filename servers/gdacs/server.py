@@ -30,6 +30,7 @@ import math
 import re
 import sys
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,7 @@ from regions import (
     UNSUPPORTED_REGIONS,
     WORLDWIDE,
     in_region,
+    names_country,
     regions_of,
 )
 from regions import norm as _norm
@@ -82,12 +84,18 @@ async def _http_get(
     url: str,
     params: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    not_found_ok: bool = False,
 ) -> httpx.Response:
-    """Perform an async HTTP GET, retrying transient failures."""
+    """Perform an async HTTP GET, retrying transient failures.
+
+    not_found_ok returns a 404 as it is (the statistic endpoint's "no match").
+    """
     async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
         for delay in (*RETRY_DELAYS, None):
             try:
                 resp = await client.get(url, params=params, headers=headers)
+                if not_found_ok and resp.status_code == 404:
+                    return resp
                 resp.raise_for_status()
                 return resp
             except httpx.HTTPError:
@@ -106,9 +114,9 @@ OutputFormat = Literal["compact", "geojson"]
 
 # GDACS's country filter is a case-insensitive substring match on its own
 # spellings, and it spells some countries several ways (seen in its data
-# 2019-2026). For these countries every spelling is searched, and only events
-# naming one of them exactly are kept, so "Republic of Korea" does not pull in
-# "Democratic Republic of Korea".
+# 2019-2026). For these countries every spelling is searched. For every
+# country, only events naming it as whole words are kept (regions.names_country),
+# so "Republic of Korea" does not pull in "Democratic Republic of Korea".
 _COUNTRY_SPELLINGS: list[tuple[list[str], list[str]]] = [
     # (names a user may type, the first being the display name; spellings GDACS uses)
     (["Turkey", "Turkiye"], ["Türkiye"]),
@@ -123,6 +131,8 @@ _COUNTRY_SPELLINGS: list[tuple[list[str], list[str]]] = [
         ["Democratic Republic of Congo", "Democratic Republic of the Congo",
          "The Democratic Republic of Congo"],
     ),
+    # GDACS's "Congo" substring also returns DR Congo; names_country drops it.
+    (["Republic of Congo", "Congo", "Congo-Brazzaville"], ["Congo"]),
     (["Eswatini", "Swaziland"], ["Eswatini", "Swaziland"]),
     (["Czechia", "Czech Republic"], ["Czech Republic"]),
     (["Ivory Coast", "Cote d'Ivoire"], ["Cote d'Ivoire"]),
@@ -131,7 +141,7 @@ _COUNTRY_SPELLINGS: list[tuple[list[str], list[str]]] = [
     (["Laos", "Lao PDR"], ["Laos"]),
     (["Bahamas"], ["Bahamas", "The Bahamas"]),
     (["Sao Tome and Principe"], ["São Tomé and Príncipe"]),
-    (["United States", "USA", "US", "United States of America", "America"], ["United States"]),
+    (["United States", "USA", "US", "United States of America"], ["United States"]),
     (["United Kingdom", "UK", "Great Britain", "Britain"], ["United Kingdom"]),
     (["Netherlands", "Holland"], ["Netherlands"]),
 ]
@@ -140,6 +150,21 @@ COUNTRY_ALIASES: dict[str, list[str]] = {
     for names, spellings in _COUNTRY_SPELLINGS
     for typed in names + spellings
 }
+# Every name that places an event in an aliased country.
+COUNTRY_NAMES: dict[str, list[str]] = {
+    _norm(typed): names + spellings
+    for names, spellings in _COUNTRY_SPELLINGS
+    for typed in names + spellings
+}
+# GDACS sometimes inverts a name around a comma, which splitting on commas
+# would read as two countries ("Congo" and "The Democratic Republic of the").
+_INVERTED_NAMES = {
+    "congo, the democratic republic of the": "Democratic Republic of the Congo",
+}
+# Only a whole entry: "Democratic Republic of Korea, Republic of Korea" must not change.
+_INVERTED = re.compile(
+    r"(?:^|(?<=,))\s*(?:" + "|".join(re.escape(k) for k in _INVERTED_NAMES) + r")\s*(?=,|$)", re.IGNORECASE
+)
 
 DISPLAY_NAMES: dict[str, str] = {
     _norm(name): names[0]
@@ -169,16 +194,22 @@ def _join(value: str | list[str] | None) -> str | None:
     return ";".join(dict.fromkeys(value)) or None
 
 
-def _parse_date(name: str, value: str | None) -> str | None:
-    """Validate a YYYY-MM-DD date and return it in ISO form."""
+def _parse_date(name: str, value: str | None, end_of_month: bool = False) -> str | None:
+    """Validate a YYYY-MM-DD date and return it in ISO form.
+
+    With end_of_month, a day past the month's end ("2023-02-29", "2024-04-31")
+    is read as the month's last day: agents often end a month on the 29th-31st.
+    """
     if value is None:
         return None
     try:
         return date.fromisoformat(value).isoformat()
     except ValueError:
-        raise ValueError(
-            f"{name} must be a date in YYYY-MM-DD format, got {value!r}."
-        ) from None
+        parts = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", value.strip())
+        if end_of_month and parts and 1 <= int(parts[2]) <= 12 and 28 < int(parts[3]) <= 31:
+            year, month = int(parts[1]), int(parts[2])
+            return (date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)).isoformat()
+        raise ValueError(f"{name} {value!r} is not a valid date in YYYY-MM-DD format.") from None
 
 
 def _country_names(props: dict, every_spelling: bool = False) -> list[str]:
@@ -191,7 +222,8 @@ def _country_names(props: dict, every_spelling: bool = False) -> list[str]:
     names instead, for matching.
     """
     affected = [c.get("countryname", "") for c in props.get("affectedcountries") or []]
-    raw = [n.strip() for n in affected + (props.get("country") or "").split(",") if n.strip()]
+    country = _INVERTED.sub(lambda m: _INVERTED_NAMES[" ".join(m.group(0).lower().split())], props.get("country") or "")
+    raw = [n.strip() for n in affected + country.split(",") if n.strip()]
     if every_spelling:
         return list(dict.fromkeys(raw))
     names: list[str] = []
@@ -262,8 +294,11 @@ def _compact(feature: dict) -> dict:
     }
 
 
-async def _fetch(params: dict[str, Any], max_results: int) -> tuple[dict | None, list[dict], bool, int]:
-    """Fetch up to max_results features, page by page.
+async def _fetch(
+    params: dict[str, Any], max_results: int, done: Callable[[list[dict]], bool] | None = None
+) -> tuple[dict | None, list[dict], bool, int]:
+    """Fetch up to max_results features, page by page, stopping early once
+    done(features) is true.
 
     Returns the first page (for its top-level keys), the features, whether
     more may exist, and the number of requests made.
@@ -294,6 +329,8 @@ async def _fetch(params: dict[str, Any], max_results: int) -> tuple[dict | None,
                 features.append(feature)
         if len(page_features) < GDACS_PAGE_SIZE or len(features) == count_before:
             return first, features, False, page
+        if done and done(features):
+            return first, features, False, page
         if len(features) >= max_results:
             # A full page means there may be another one.
             return first, features, True, page
@@ -308,9 +345,10 @@ class _Place:
     """Where to search.
 
     queries has one entry per country asked for: the names to send as
-    GDACS's country filter, and the exact spellings to keep (None keeps every
-    match). GDACS has no region or coordinate filter, so region and box are
-    applied here, to a worldwide (or country) search.
+    GDACS's country filter, and the names that place an event in that
+    country (None, worldwide, keeps every match). GDACS has no region or
+    coordinate filter, so region and box are applied here, to a worldwide
+    (or country) search.
     """
 
     queries: list[tuple[list[str | None], list[str] | None]] = field(default_factory=list)
@@ -360,7 +398,7 @@ def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     p1, p2 = math.radians(lat1), math.radians(lat2)
     a = (math.sin((p2 - p1) / 2) ** 2
          + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
-    return 2 * 6371 * math.asin(math.sqrt(a))
+    return 2 * 6371 * math.asin(min(1.0, math.sqrt(a)))  # rounding can put a just over 1
 
 
 def _parse_near(near: str | list[float], radius_km: float) -> tuple[float, float, float]:
@@ -404,6 +442,11 @@ def _parse_place(
         key = _norm(name)
         if key in WORLDWIDE:
             continue
+        if key == "america":
+            raise ValueError(
+                "'America' could mean the United States or both continents: pass 'United States', "
+                "or a region such as 'Americas', 'North America' or 'Latin America'."
+            )
         if key in UNSUPPORTED_REGIONS:
             raise ValueError(
                 f"{name!r} is not a region this tool knows. Pass its countries as a list "
@@ -416,14 +459,14 @@ def _parse_place(
         elif key in SEA_BOXES:
             place.label, place.box = SEA_BOXES[key]
         else:
-            spellings = COUNTRY_ALIASES.get(key)
-            place.queries.append((spellings or [name], spellings))
-            place.countries += spellings or [name]
+            spellings = COUNTRY_ALIASES.get(key, [name])
+            place.queries.append((spellings, COUNTRY_NAMES.get(key, [name])))
+            place.countries += spellings
     if bbox is not None:
         if place.box:
             raise ValueError("Give a sea name or a bbox, not both.")
         place.box = _parse_bbox(bbox)
-        place.label = "the area searched"
+        place.label = "the area given"
     if near is not None:
         if place.box:
             raise ValueError("Give near or a bbox (or sea), not both.")
@@ -436,24 +479,25 @@ def _parse_place(
     return place
 
 
-def _no_results(place: _Place, included_green: bool) -> str:
+def _no_results(place: _Place, included_green: bool, name_from: str | None = None) -> str:
+    # A name GDACS has never recorded is caught earlier (_unknown_places), so
+    # this is a real place with nothing in the period: no spelling hint.
     message = "No results found for query."
     if included_green:
         message += " Green (low-impact) events were included in the search."
     if place.name:
         message += f" Searched {place.name}."
-    unmapped = [c for names, spellings in place.queries if not spellings for c in names if c]
-    if unmapped:
+    if name_from:
+        # The 5-year default hides older named events ("Haiyan", 2013).
         message += (
-            f" GDACS matches country names in its own spelling, so check {', '.join(map(repr, unmapped))}"
-            " (e.g. 'Türkiye', 'Viet Nam')."
+            f" A name search without dates covers only the last {NAME_SEARCH_YEARS} years (since {name_from}). "
+            "For an older event, search again with from_date and to_date around the year it happened."
         )
     return json.dumps({"error": message})
 
 
-def _matches_spelling(names: list[str], spellings: list[str]) -> bool:
-    """True if one of the names is exactly one of a country's GDACS spellings."""
-    return bool({_norm(s) for s in spellings} & {_norm(n) for n in names})
+def _in_country(names: list[str], country: list[str] | None) -> bool:
+    return country is None or names_country(names, country)
 
 
 def _point(feature: dict) -> tuple[Any, Any]:
@@ -462,30 +506,40 @@ def _point(feature: dict) -> tuple[Any, Any]:
     return (coords[1], coords[0]) if len(coords) >= 2 else (None, None)
 
 
-async def _statistic(params: dict[str, Any], place: _Place) -> tuple[int, list[dict]]:
+async def _statistic_rows(params: dict[str, Any]) -> list[dict]:
+    """The statistic endpoint's rows; it answers 404 when nothing matches."""
+    resp = await _http_get(
+        GDACS_STATISTIC_URL, params=params, headers={"User-Agent": GDACS_USER_AGENT}, not_found_ok=True
+    )
+    if resp.status_code == 404 or not resp.text:
+        return []
+    return resp.json().get("details") or []
+
+
+async def _statistic(params: dict[str, Any], place: _Place) -> tuple[dict[str | None, int], list[dict]]:
     """Every matching event as a short row, from GDACS's statistic endpoint.
 
     One call per country spelling, merged; rows are only type, id, alert
-    level, country text and dates, which is all the counts need. Returns how
-    many events GDACS matched (what SEARCH would page through) and the rows
-    in the place. Rows have no coordinates, so with a box only the first
-    number is useful.
+    level, country text, dates and a description (which holds a cyclone's or
+    volcano's name), which is all the counts need. Returns how many events
+    GDACS matched for each name sent (what SEARCH would page through), and
+    the rows in the place. Rows have no coordinates, so for a box or near
+    search no row is in the place and only the first number is useful.
     """
     rows: list[dict] = []
     seen: set[tuple] = set()
-    matched = 0
-    for names, spellings in place.queries:
+    matched: dict[str | None, int] = {}
+    for names, country in place.queries:
         for name in names:
             query = {**params, "country": name} if name else params
-            resp = await _http_get(GDACS_STATISTIC_URL, params=query, headers={"User-Agent": GDACS_USER_AGENT})
-            details = (resp.json().get("details") or []) if resp.text else []
-            matched += len(details)
+            details = await _statistic_rows(query)
+            matched[name] = len(details)
             for row in details:
                 key = (row.get("eventtype"), row.get("eventid"))
                 names_in_row = _country_names(row, every_spelling=True)
-                if key in seen or (spellings and not _matches_spelling(names_in_row, spellings)):
+                if key in seen or not _in_country(names_in_row, country):
                     continue
-                if place.keeps(names_in_row):
+                if place.keeps(names_in_row, title=row.get("description")):
                     seen.add(key)
                     rows.append(row)
     return matched, rows
@@ -500,32 +554,54 @@ def _row_event(row: dict) -> dict:
     }
 
 
+@dataclass
+class _Searched:
+    first: dict | None  # GDACS's first page, for its top-level keys
+    features: list[dict]  # the events in the place
+    more: bool  # a name hit its page limit, so features may not be every match
+    requests: int
+    checked: int  # events downloaded before the place filter
+
+
 async def _search(
-    params: dict[str, Any], place: _Place, limit: int = FETCH_LIMIT
-) -> tuple[dict | None, list[dict], bool, int]:
-    """Run one search per country spelling, merge, and keep the events in the place."""
-    first: dict | None = None
-    features: list[dict] = []
+    params: dict[str, Any], place: _Place, limit: int = FETCH_LIMIT,
+    limits: dict[str | None, int] | None = None, want: int | None = None,
+) -> _Searched:
+    """Run one search per country spelling, merge, and keep the events in the place.
+
+    limits sets the page limit for each name sent (default limit). With
+    want, paging stops once that many events in the place are found.
+    """
+    found = _Searched(None, [], False, 0, 0)
     seen: set[tuple] = set()
-    more = False
-    requests = 0
-    for names, spellings in place.queries:
+
+    def kept(feature: dict, country: list[str] | None) -> bool:
+        props = feature.get("properties", {})
+        names_in_event = _country_names(props, every_spelling=True)
+        return _in_country(names_in_event, country) and place.keeps(
+            names_in_event, *_point(feature), props.get("name")
+        )
+
+    for names, country in place.queries:
         for name in names:
             query = {**params, "country": name} if name else params
-            page_first, page_features, page_more, page_requests = await _fetch(query, limit)
-            first = first or page_first
-            more = more or page_more
-            requests += page_requests
-            for feature in page_features:
+            done = None
+            if want is not None:
+                def done(fs: list[dict], country: list[str] | None = country) -> bool:
+                    return len(found.features) + sum(kept(f, country) for f in fs) >= want
+            first, features, more, requests = await _fetch(query, (limits or {}).get(name, limit), done)
+            found.first = found.first or first
+            found.more = found.more or more
+            found.requests += requests
+            found.checked += len(features)
+            for feature in features:
                 props = feature.get("properties", {})
                 key = (props.get("eventtype"), props.get("eventid"))
-                names_in_event = _country_names(props, every_spelling=True)
-                if key in seen or (spellings and not _matches_spelling(names_in_event, spellings)):
-                    continue
-                if place.keeps(names_in_event, *_point(feature), props.get("name")):
+                if key not in seen and kept(feature, country):
                     seen.add(key)
-                    features.append(feature)
-    return first, features, more, requests
+                    found.features.append(feature)
+    return found
+
 
 
 def _countries(events: list[dict], region: str | None) -> dict[str, int]:
@@ -583,19 +659,23 @@ def _details(events: list[dict]) -> dict:
 
 
 def _importance(e: dict) -> tuple:
-    """Highest alert level first, then the largest, then the latest."""
-    return (ALERT_RANK.get(e["alert_level"], 0), e["_size"][0] if e["_size"] else 0, e["to_date"] or "")
+    """Highest alert level first, then the latest. Sizes are not compared:
+    a drought's km2 and an earthquake's magnitude are different units (the
+    summary names the largest of each hazard)."""
+    return (ALERT_RANK.get(e["alert_level"], 0), e["to_date"] or "", e["from_date"] or "")
 
 
 @dataclass
 class _Found:
     first: dict | None
     pairs: list[tuple[dict, dict]]  # (GeoJSON feature, compact event)
-    more: bool  # more than FETCH_LIMIT matched, so pairs is not every match
+    more: bool  # not every match was fetched, so pairs is not every match
     requests: int
     used: dict[str, Any]  # the params that found the events
     serious_complete: bool
     stats: list[dict] | None = None  # every match in the place, from the statistic endpoint
+    matched: int | None = None  # events GDACS matched before the place filter
+    checked: int = 0  # of those, how many were downloaded and checked
 
 
 async def _gather(
@@ -609,19 +689,34 @@ async def _gather(
             pairs = [(f, e) for f, e in pairs if e["is_current"] or e["_recent"]]
         return pairs
 
-    # Count first (one fast request): under FETCH_LIMIT, fetch every match;
-    # over it, fetching 2,000 events would still not be all of them, so fetch
-    # one page for the list and rely on the exact counts. The statistic
-    # endpoint has no severity filter, so with min_severity just page.
-    matched, stats = None, None
-    if "severity" not in params and not place.event_name:
+    # Count first (one fast request per name). The statistic endpoint has no
+    # severity filter, so with min_severity just page.
+    matched: dict[str | None, int] | None = None
+    stats: list[dict] | None = None
+    if "severity" not in params:
         try:
             matched, stats = await _statistic(params, place)
         except Exception:
             matched, stats = None, None
-    limit = FETCH_LIMIT if matched is None or matched <= FETCH_LIMIT else GDACS_PAGE_SIZE
-    first, features, more, requests = await _search(params, place, limit)
-    more = more or (matched is not None and matched > FETCH_LIMIT)
+
+    limits: dict[str | None, int] | None = None
+    want: int | None = None
+    limit = FETCH_LIMIT
+    if place.event_name and stats is not None:
+        # The rows' descriptions hold the names, so the count of named events
+        # is known: page until all of them are found or the pages end.
+        if not stats:
+            return _Found(None, [], False, len(matched or {}), params, False, stats)
+        want, limit = len(stats), sys.maxsize
+    elif matched and not place.by_coords:
+        # Each name on its own: under FETCH_LIMIT, fetch every match; over
+        # it, 2,000 events would still not be all of them, so fetch one page
+        # for the list and rely on the exact counts.
+        limits = {n: FETCH_LIMIT if c <= FETCH_LIMIT else GDACS_PAGE_SIZE for n, c in matched.items()}
+    # A box or near search keeps the default limit: GDACS has no location
+    # filter, so the events in the area can be anywhere in the wider search.
+    searched = await _search(params, place, limit, limits, want)
+    features, more, requests = searched.features, searched.more, searched.requests
 
     # A region over FETCH_LIMIT worldwide is often small itself (Europe's
     # wildfires: 383 of 7,516). The statistic rows name its countries, so
@@ -649,37 +744,54 @@ async def _gather(
     serious = sorted(levels & {"Orange", "Red"})
     serious_complete = False
     if more and "Green" in levels and serious:
-        _, serious_features, serious_more, serious_requests = await _search(
-            {**params, "alertlevel": ";".join(serious)}, place
-        )
-        requests += serious_requests
+        serious_found = await _search({**params, "alertlevel": ";".join(serious)}, place)
+        requests += serious_found.requests
         seen = {(e["type"], e["id"]) for _, e in pairs}
-        pairs += [(f, e) for f, e in keep(serious_features) if (e["type"], e["id"]) not in seen]
-        serious_complete = not serious_more
+        pairs += [(f, e) for f, e in keep(serious_found.features) if (e["type"], e["id"]) not in seen]
+        serious_complete = not serious_found.more
 
     pairs.sort(key=lambda p: _importance(p[1]), reverse=True)
-    return _Found(first, pairs, more, requests, params, serious_complete, stats)
+    return _Found(
+        searched.first, pairs, more, requests, params, serious_complete, stats,
+        sum(matched.values()) if matched else None, searched.checked,
+    )
 
 
-async def _unknown_places(place: _Place) -> list[str]:
-    """Country names GDACS has never recorded (e.g. "Queensland", "Atlantis").
+async def _unknown_places(place: _Place, types: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+    """Names GDACS has never recorded as a country, checked against everything since 2000.
 
-    A country with no events in the period and a name GDACS does not know
-    both return nothing, so check the name against everything since 2000.
+    Returns the names it has never recorded at all ("Queensland", "Atlantis";
+    the same whole-word rule, so "Guin" is unknown), and the names it has
+    recorded only in earthquake region names, with examples ("California":
+    "Southern California", "Gulf Of California"). GDACS names earthquakes by
+    seismic region but other hazards by country, so a wildfire search for
+    "California" finds nothing although the state has wildfires.
     """
-    unknown = []
-    for names, spellings in place.queries:
+    unknown: list[str] = []
+    quake_regions: dict[str, list[str]] = {}
+    for names, country in place.queries:
         for name in names:
-            if not name or spellings:
+            if not name or _norm(name) in COUNTRY_ALIASES:
                 continue
-            resp = await _http_get(
-                GDACS_SEARCH_URL,
-                params={"country": name, "fromDate": "2000-01-01", "alertlevel": "Green;Orange;Red", "pagenumber": 1},
-                headers={"User-Agent": GDACS_USER_AGENT},
-            )
-            if not resp.text or not (resp.json().get("features") or []):
+            rows = await _statistic_rows({"country": name, "fromDate": "2000-01-01", "alertlevel": "Green;Orange;Red"})
+            rows = [r for r in rows if _in_country(_country_names(r, every_spelling=True), country)]
+            if not rows:
                 unknown.append(name)
-    return unknown
+            elif types != ["EQ"] and all(r.get("eventtype") == "EQ" for r in rows):
+                quake_regions[name] = [n for n, _ in Counter(r.get("country") or "" for r in rows).most_common(2)]
+    return unknown, quake_regions
+
+
+def _partial_area(place: _Place, found: _Found, counts: str = "") -> str:
+    """tell_user text for a box or near search that hit FETCH_LIMIT."""
+    wider = f"in {', '.join(place.countries)}" if place.countries else "worldwide"
+    checked = f"the first {found.checked:,} of {found.matched:,}" if found.matched else f"the first {found.checked:,}"
+    serious = " All Orange and Red events were checked." if found.serious_complete else ""
+    return (
+        f"GDACS has no location filter, so only {checked} events {wider} were checked for "
+        f"{place.name}: the area was only partly searched.{serious}{counts} Narrow the dates or "
+        "hazard, or add the country, for a complete search."
+    )
 
 
 def _latest(pairs: list[tuple[dict, dict]]) -> dict:
@@ -724,7 +836,8 @@ async def search_gdacs_events(
         East; South, Southeast, East, Central Asia; North, Central, South,
         Latin America; Caribbean; Americas; Oceania) or a sea or ocean (Bay
         of Bengal, Arabian Sea, South China Sea, Philippine Sea, Coral Sea,
-        Gulf of Mexico, Mediterranean, Indian Ocean, Pacific, Atlantic,
+        Gulf of Mexico, Mediterranean, Indian Ocean, North Indian Ocean,
+        Pacific, Atlantic, each with North and South, Western Pacific,
         Arctic). Unset: worldwide.
         A name GDACS has never recorded returns an error saying so.
     bbox: A state, province or island, as "west,south,east,north" in
@@ -757,7 +870,7 @@ async def search_gdacs_events(
         floods, cyclones and wildfires are still going), date_span, largest (per hazard: the biggest by magnitude, wind,
         burnt area or drought area) and wildfire_burnt_area_ha.
         most_recent: the event with the latest to_date. events: the key
-        events, highest alert level first, then largest, each with name,
+        events, highest alert level first, then most recent, each with name,
         alert_level, countries, from_date, is_current, then to_date for an
         event that has ended or last_updated for one still going (GDACS's
         latest update, not an end date), severity, lat, lon, report_url. On
@@ -777,7 +890,7 @@ async def search_gdacs_events(
         from_date = (today - timedelta(days=since_days)).isoformat()
     try:
         start = _parse_date("from_date", from_date)
-        end = _parse_date("to_date", to_date)
+        end = _parse_date("to_date", to_date, end_of_month=True)
         place = _parse_place(country, bbox, near, radius_km, name)
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
@@ -817,6 +930,14 @@ async def search_gdacs_events(
         # Only cyclones ("MELISSA-25") and volcanoes ("Eruption Etna") have
         # names in GDACS; other events are named "Flood in [country]".
         types = ["TC", "VO"]
+    if place.event_name and not set(types) & {"TC", "VO"}:
+        # A name over earthquakes or floods only matches country words in their
+        # titles: name="Guinea" finds "Earthquake in Papua New Guinea".
+        return json.dumps({
+            "error": "Only tropical cyclones (TC) and volcanoes (VO) have names in GDACS, e.g. 'MELISSA-25', "
+            "'Etna'. Other events are titled after their country ('Earthquake in Peru'): search them with "
+            "country instead of name."
+        })
     if set(types) >= SEARCHABLE_TYPES:
         types = []
 
@@ -843,6 +964,24 @@ async def search_gdacs_events(
     cutoff = (today - timedelta(days=ACTIVE_WINDOW_DAYS)).isoformat()
     active_params = {**params, "fromDate": max(start or cutoff, cutoff)}
 
+    # What was searched: in every response, including empty ones.
+    searched_meta: dict[str, Any] = {
+        "date_range": (
+            {"from": start, "to": end or today.isoformat()} if start
+            else {"from": "about 12 months ago (default)", "to": today.isoformat()}
+        )
+    }
+    if place.countries:
+        searched_meta["country_searched"] = place.countries
+    if place.region:
+        searched_meta["region_searched"] = place.region
+    if place.box:
+        searched_meta["area_searched"] = {"name": place.name, "bbox": list(place.box)}
+    if place.near:
+        searched_meta["area_searched"] = {"near": list(place.near[:2]), "radius_km": place.near[2]}
+    if place.event_name:
+        searched_meta["name_searched"] = name
+
     try:
         found = await _gather(active_params if active_only else params, place, alertlevel, active_only)
         if active_only and not found.pairs:
@@ -864,17 +1003,32 @@ async def search_gdacs_events(
                     "most_recent": latest,
                     "count": 0,
                     "truncated": False,
+                    **searched_meta,
                     "events": [],
                 })
     except Exception as exc:
         return json.dumps({"error": f"Disaster search failed: {exc}"})
 
     pairs = found.pairs
+    partial_area = place.by_coords and found.more
+    if partial_area and not pairs:
+        # The events checked were only part of the wider search, so an empty
+        # area is not "no results".
+        return json.dumps({
+            "tell_user": [_partial_area(place, found)],
+            "retrieved_at": today.isoformat(),
+            "total": 0,
+            "total_is_lower_bound": True,
+            "count": 0,
+            "truncated": True,
+            **searched_meta,
+            "events": [],
+        })
     if found.first is None or not pairs:
         try:
-            unknown = await _unknown_places(place)
+            unknown, quake_regions = await _unknown_places(place, types)
         except Exception:
-            unknown = []
+            unknown, quake_regions = [], {}
         if unknown:
             return json.dumps({
                 "error": f"{', '.join(map(repr, unknown))} is not a country, region or sea that GDACS "
@@ -882,7 +1036,16 @@ async def search_gdacs_events(
                 "pass its bbox (or near, for 'near [place]') with the country it lies in. Otherwise "
                 "check the spelling, or tell the user GDACS has no data for it."
             })
-        return _no_results(place, included_green)
+        if quake_regions:
+            name, examples = next(iter(quake_regions.items()))
+            return json.dumps({
+                "error": f"GDACS has recorded {name!r} only in earthquake region names (e.g. "
+                f"{', '.join(map(repr, examples))}); other hazards are recorded by country. If it is a "
+                "state, province, island or city, call geocode_place and pass its bbox (or near, for "
+                "'near [place]') with the country it lies in."
+            })
+        name_from = start if place.event_name and not (from_date or since_days) else None
+        return _no_results(place, included_green, name_from)
     events = [e for _, e in pairs]
 
     # Normally every match has been fetched, and everything is computed from
@@ -946,6 +1109,8 @@ async def search_gdacs_events(
             f"event come from {len(events)} of the {total} matches. Narrow the dates or area for "
             "complete figures."
         )
+    elif partial_area:
+        tell_user.append(_partial_area(place, found, " Counts are minimums."))
     elif lower_bound:
         complete = " Orange and Red counts are complete." if found.serious_complete else ""
         tell_user.append(
@@ -954,7 +1119,7 @@ async def search_gdacs_events(
         )
     if truncated:
         notes.append(
-            f"events lists the {count} key events (highest alert, then largest) of {total}; use "
+            f"events lists the {count} key events (highest alert, then most recent) of {total}; use "
             "summary for counts, largest events and how many are ongoing."
         )
 
@@ -972,20 +1137,7 @@ async def search_gdacs_events(
         "count": count,
         "truncated": truncated,
     }
-    meta["date_range"] = (
-        {"from": start, "to": end or today.isoformat()} if start
-        else {"from": "about 12 months ago (default)", "to": today.isoformat()}
-    )
-    if place.countries:
-        meta["country_searched"] = place.countries
-    if place.region:
-        meta["region_searched"] = place.region
-    if place.box:
-        meta["area_searched"] = {"name": place.name, "bbox": list(place.box)}
-    if place.near:
-        meta["area_searched"] = {"near": list(place.near[:2]), "radius_km": place.near[2]}
-    if place.event_name:
-        meta["name_searched"] = name
+    meta |= searched_meta
 
     if format == "geojson":
         first = found.first

@@ -20,7 +20,9 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import traceback
 from pathlib import Path
 
 import httpx
@@ -73,14 +75,26 @@ def _print_result(result) -> dict | None:
 
 
 def _start_server(port: int) -> subprocess.Popen:
-    """Launch server.py as a subprocess on the given port."""
+    """Launch server.py as a subprocess on the given port.
+
+    Its output goes to a temporary file, not a pipe: the server logs every
+    GDACS request, and an unread pipe fills (about 64 KB) and blocks it.
+    """
+    log = tempfile.TemporaryFile()  # noqa: SIM115 (closed with the process)
     proc = subprocess.Popen(
         [sys.executable, str(SERVER_PY), "--transport", "http", "--port", str(port)],
         env=os.environ.copy(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log,
+        stderr=subprocess.STDOUT,
     )
+    proc.log = log  # type: ignore[attr-defined]
     return proc
+
+
+def _server_log(proc: subprocess.Popen, limit: int = 2000) -> str:
+    """The end of the server's output."""
+    proc.log.seek(0)  # type: ignore[attr-defined]
+    return proc.log.read().decode(errors="replace")[-limit:]  # type: ignore[attr-defined]
 
 
 async def _wait_for_server(url: str, timeout: float = STARTUP_TIMEOUT) -> None:
@@ -345,6 +359,30 @@ async def test_country_spellings(session: ClientSession) -> None:
                                       "from_date": "2025-03-01", "to_date": "2025-03-31"})
     assert bracketed.get("events"), bracketed
     assert bracketed["country_searched"] == ["Myanmar"], bracketed["country_searched"]
+    # GDACS's country filter is a substring match; only events naming the
+    # country as whole words are kept, and a longer country name wins.
+    def names(parsed: dict) -> set[str]:
+        return {c for e in parsed.get("events", []) for c in e["countries"]}
+
+    guinea = await _call(session, {"country": "Guinea", "eventlist": "EQ", "from_date": "2024-01-01",
+                                   "to_date": "2024-06-30"})
+    assert not any("Papua New Guinea" in e["countries"] for e in guinea.get("events", [])), names(guinea)
+    niger = await _call(session, {"country": "Niger", "from_date": "2019-01-01", "to_date": "2024-12-31",
+                                  "max_results": 100})
+    assert niger["events"] and all("Niger" in e["countries"] for e in niger["events"]), names(niger)
+    assert niger["summary"]["countries"].get("Niger") == niger["total"], niger["summary"]["countries"]
+    oman = await _call(session, {"country": "Oman", "from_date": "2023-01-01", "to_date": "2024-12-31"})
+    assert oman["events"] and all("Oman" in e["countries"] for e in oman["events"]), names(oman)
+    dominica = await _call(session, {"country": "Dominica", "eventlist": "EQ", "from_date": "2023-01-01",
+                                     "to_date": "2024-12-31"})
+    assert "Dominican Republic" not in names(dominica), names(dominica)
+    for congo in ("Congo", "Republic of Congo"):
+        parsed = await _call(session, {"country": congo, "eventlist": "EQ", "from_date": "2023-01-01",
+                                       "to_date": "2024-12-31"})
+        assert "DR Congo" not in names(parsed), (congo, names(parsed))
+    # A real country with nothing in the period gets no spelling hint.
+    assert "spelling" not in dominica.get("error", ""), dominica
+
     # "South Africa" is a country, not the "Africa" region.
     assert "error" not in (await _call(session, {"country": "South Africa", "alertlevel": ["Green", "Orange", "Red"]}))
     print("  [PASS] country names mapped")
@@ -428,18 +466,38 @@ async def test_places(session: ClientSession) -> None:
 
     # A sea is searched by coordinates.
     bay = await _call(session, {"eventlist": "TC", "alertlevel": every_level, "country": "Bay of Bengal",
-                                "from_date": "2025-01-01"})
-    if "error" not in bay:
-        box = bay["area_searched"]["bbox"]
-        assert all(_inside(e, box) for e in bay["events"]), [(e["lat"], e["lon"]) for e in bay["events"]]
-        assert any("coordinates" in t for t in bay["tell_user"])
+                                "from_date": "2024-01-01", "to_date": "2024-12-31"})
+    assert "error" not in bay, bay
+    box = bay["area_searched"]["bbox"]
+    assert all(_inside(e, box) for e in bay["events"]), [(e["lat"], e["lon"]) for e in bay["events"]]
+    assert any("coordinates" in t for t in bay["tell_user"])
+    # Cyclones worldwide in 2024 are under the fetch limit, so every one was checked.
+    assert bay["total_is_lower_bound"] is False and bay["total"] >= 1, bay
+
+    # Every hazard worldwide in 2024 is over 10,000 events: GDACS has no
+    # location filter, so the server checks the first 2,000 and says the
+    # area was only partly searched, never "no results".
+    bay_all = await _call(session, {"country": "Bay of Bengal", "from_date": "2024-01-01", "to_date": "2024-12-31"})
+    assert bay_all["total_is_lower_bound"] is True, bay_all
+    assert any("only partly searched" in t for t in bay_all["tell_user"]), bay_all["tell_user"]
+    open_sea = await _call(session, {"bbox": "-30,-40,-29,-39", "from_date": "2024-01-01", "to_date": "2024-12-31"})
+    assert "error" not in open_sea and open_sea["total"] == 0, open_sea
+    assert any("only partly searched" in t for t in open_sea["tell_user"]), open_sea
+
+    # "South Atlantic" is its own box, not the whole Atlantic.
+    south = await _call(session, {"eventlist": "TC", "country": "South Atlantic", "from_date": "2024-01-01",
+                                  "to_date": "2024-12-31"})
+    assert south.get("area_searched", {}).get("bbox") == [-70, -60, 20, 0] or "error" in south, south
+    assert not any(e["lat"] > 0 for e in south.get("events", [])), "South Atlantic returned northern events"
 
     # Any area as a bbox (geocode_place's format), with the country it is in.
     california = "-124.4820,32.5295,-114.1308,42.0095"
     quakes = await _call(session, {"eventlist": "EQ", "alertlevel": every_level, "country": "United States",
-                                   "bbox": california, "from_date": "2025-01-01"})
-    if "error" not in quakes:
-        assert all(_inside(e, quakes["area_searched"]["bbox"]) for e in quakes["events"])
+                                   "bbox": california, "from_date": "2025-01-01", "to_date": "2025-12-31"})
+    assert "error" not in quakes, quakes
+    assert all(_inside(e, quakes["area_searched"]["bbox"]) for e in quakes["events"])
+    # US earthquakes are under the fetch limit: all were checked, so the count is complete.
+    assert quakes["total_is_lower_bound"] is False, quakes
 
     # Nothing active: the response says so and gives the most recent match.
     volcano = await _call(session, {"eventlist": "VO", "country": "Indonesia", "alertlevel": every_level,
@@ -470,7 +528,9 @@ async def test_places(session: ClientSession) -> None:
         largest = hectares(fires["summary"]["largest"]["wildfire"]["severity"])
         listed = [hectares(e["severity"]) for e in fires["events"]]
         assert largest >= max(listed), (largest, max(listed))
-        assert hectares(fires["events"][0]["severity"]) == largest, "key events should start with the largest"
+        rank = {"Red": 2, "Orange": 1, "Green": 0}
+        order = [(rank[e["alert_level"]], _end(e)) for e in fires["events"]]
+        assert order == sorted(order, reverse=True), "key events: highest alert, then most recent"
         assert fires["summary"]["ongoing"] <= fires["total"]
         assert "_size" not in fires["events"][0], "internal keys must not leak"
     # A name GDACS has never recorded is reported as unknown, not as "no events".
@@ -481,9 +541,22 @@ async def test_places(session: ClientSession) -> None:
     iceland = await _call(session, {"eventlist": "VO", "country": "Iceland", "from_date": "2026-11-20"})
     assert "error" not in iceland or "has ever recorded" not in iceland["error"], iceland
 
+    # GDACS names only earthquake regions after some states ("Southern California");
+    # other hazards are filed under the country, so the error points to geocode.
+    california = await _call(session, {"eventlist": "WF", "country": "California", "from_date": "2025-01-01",
+                                       "to_date": "2025-12-31"})
+    assert "only in earthquake region names" in california.get("error", ""), california
+    # A day past the month's end is read as the month's last day.
+    february = await _call(session, {"eventlist": "EQ", "country": "Turkey", "from_date": "2023-02-01",
+                                     "to_date": "2023-02-29"})
+    assert february["date_range"]["to"] == "2023-02-28", february.get("date_range", february)
+
     # Named events, matched as whole words, over 5 years by default.
     melissa = await _call(session, {"eventlist": "TC", "country": "Jamaica", "name": "Melissa"})
     assert any("MELISSA" in e["name"] for e in melissa["events"]), melissa
+    # An older named event without dates: the error says only 5 years were searched.
+    haiyan = await _call(session, {"eventlist": "TC", "name": "Haiyan"})
+    assert "covers only the last 5 years" in haiyan.get("error", ""), haiyan
     etna = await _call(session, {"name": "Etna"})
     assert etna["events"] and all("Etna" in e["name"] for e in etna["events"]), [e["name"] for e in etna["events"]]
 
@@ -576,6 +649,8 @@ async def test_invalid_arguments(session: ClientSession) -> None:
         ({"eventlist": "TS"}, "no tsunami"),
         ({"min_severity": -1}, "min_severity"),
         ({"country": "Scandinavia"}, "Pass its countries as a list"),
+        ({"country": "America"}, "'United States'"),
+        ({"eventlist": "EQ", "name": "Guinea"}, "Only tropical cyclones (TC) and volcanoes (VO) have names"),
         ({"country": ["Africa", "Kenya"]}, "on its own"),
         ({"country": "Bay of Bengal", "bbox": "80,5,95,23"}, "not both"),
         ({"bbox": "1,2,3"}, "bbox must be"),
@@ -647,13 +722,17 @@ def main():
 
     except TimeoutError:
         print(f"\n  [FAIL] Server did not start within {STARTUP_TIMEOUT}s")
-        stderr = proc.stderr.read().decode() if proc.stderr else ""
-        if stderr:
-            print(f"\n  Server stderr:\n{stderr[:2000]}")
+        output = _server_log(proc)
+        if output:
+            print(f"\n  Server output:\n{output}")
         sys.exit(1)
 
     except Exception as exc:
-        print(f"\n  [FAIL] {exc}")
+        # The MCP client wraps failures in an ExceptionGroup: show the real ones.
+        while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+            exc = exc.exceptions[0]
+        print(f"\n  [FAIL] {type(exc).__name__}: {exc}")
+        traceback.print_exception(exc, limit=-3)
         sys.exit(1)
 
     finally:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 
 
 def norm(name: str) -> str:
@@ -243,9 +244,17 @@ _SEAS: list[tuple[list[str], tuple[float, float, float, float]]] = [
     (["Coral Sea"], (145, -30, 165, -10)),
     (["Gulf of Mexico"], (-98, 18, -80, 31)),
     (["Mediterranean", "Mediterranean Sea"], (-6, 30, 36, 46)),
-    (["Indian Ocean", "North Indian Ocean"], (20, -60, 100, 30)),
-    (["Pacific", "Pacific Ocean", "North Pacific", "South Pacific", "Western Pacific"], (100, -60, -70, 66)),
-    (["Atlantic", "Atlantic Ocean", "North Atlantic", "South Atlantic"], (-100, -60, 20, 66)),
+    (["Indian Ocean"], (20, -60, 100, 30)),
+    (["North Indian Ocean"], (40, 0, 100, 30)),
+    (["Pacific", "Pacific Ocean"], (100, -60, -70, 66)),
+    # North and South halves split at the equator, so "South Atlantic" does not
+    # return North Atlantic hurricanes.
+    (["North Pacific", "North Pacific Ocean"], (100, 0, -100, 66)),
+    (["South Pacific", "South Pacific Ocean"], (130, -60, -70, 0)),
+    (["Western Pacific"], (100, -60, 180, 66)),
+    (["Atlantic", "Atlantic Ocean"], (-100, -60, 20, 66)),
+    (["North Atlantic", "North Atlantic Ocean"], (-100, 0, 20, 66)),
+    (["South Atlantic", "South Atlantic Ocean"], (-70, -60, 20, 0)),
     (["Arctic", "Arctic Ocean"], (-180, 66, 180, 90)),
 ]
 SEA_BOXES: dict[str, tuple[str, tuple[float, float, float, float]]] = {
@@ -269,13 +278,35 @@ for _region, _names in REGIONS.items():
     for _name in _names:
         _KEY_REGIONS.setdefault(norm(_name), set()).add(_region)
 
-# One pattern, longest names first so the longest match wins; a name only
-# matches as whole words.
-_PATTERN = re.compile(
-    r"(?<![\w])(?:"
-    + "|".join(re.escape(k) for k in sorted(_KEY_REGIONS, key=len, reverse=True))
-    + r")(?![\w])"
-)
+def _whole_words(names: set[str]) -> re.Pattern:
+    """One pattern, longest names first so the longest match wins; a name only
+    matches as whole words."""
+    return re.compile(
+        r"(?<![\w])(?:" + "|".join(re.escape(k) for k in sorted(names, key=len, reverse=True)) + r")(?![\w])"
+    )
+
+
+_PATTERN = _whole_words(set(_KEY_REGIONS))
+
+
+@lru_cache(maxsize=256)
+def _country_pattern(country: frozenset[str]) -> re.Pattern:
+    return _whole_words(set(_KEY_REGIONS) | country)
+
+
+def names_country(names: list[str], country: list[str]) -> bool:
+    """True if one of an event's names places it in the country.
+
+    GDACS's country filter is a substring match, so "Guinea" also returns
+    Papua New Guinea and "India" returns "Mid-Indian Ridge". The same rule as
+    regions: a name must contain one of the country's spellings as whole
+    words, and a longer known name wins, so "Peru" matches "Off Coast Of
+    Peru" but "Guinea" does not match "Papua New Guinea", nor "Sudan" "South
+    Sudan".
+    """
+    wanted = frozenset(norm(c) for c in country)
+    pattern = _country_pattern(wanted)
+    return any(m.group(0) in wanted for name in names for m in pattern.finditer(norm(name)))
 
 
 def regions_of(name: str) -> set[str]:
