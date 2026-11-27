@@ -13,12 +13,12 @@ services:
       - fetch_landsat_ot_l1
       - fetch_dem
     credentials:
-      - variable: CDSE_CLIENT_ID
+      - header: X-CDSE-Client-Id
         label: Copernicus client ID
         help: OAuth client id from the Sentinel Hub dashboard.
         url: https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
         secret: false
-      - variable: CDSE_CLIENT_SECRET
+      - header: X-CDSE-Client-Secret
         label: Copernicus client secret
         help: OAuth client secret from the Sentinel Hub dashboard.
         url: https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings

@@ -52,7 +52,7 @@ Each server directory contains:
 | `requirements.txt` | Yes | pip dependencies with version constraints |
 | `CITATION.cff` | Yes | Authors and citation metadata in [Citation File Format](https://citation-file-format.github.io/) 1.2.0 |
 | `README.md` | No | Server docs; created or extended after merge with an Authors and Citation section from `CITATION.cff` |
-| `environment.yaml` | No | User-facing accounts: labels, links, and the header or variable name to send |
+| `environment.yaml` | No | User-facing accounts: labels, links, and the header name to send |
 | `.env.template` | No | Secret placeholders; CI substitutes them at deploy time |
 | `test.py` | No (recommended) | Local test script |
 
@@ -240,9 +240,9 @@ Rules:
 - `id` is a stable slug. `label` is the name in the UI. `provider` is who issues the account. `url` is the account home.
 - `tools` lists the MCP tool names that need this account. A tool missing from every list needs no account.
 - `credentials` is the fields the user fills in. Each item has `label`, `help`, `url`, and `secret`.
-- Set `header` to the HTTP header name the server reads, such as `X-CDSE-Client-Id`. Set `variable` to the environment variable the server reads, such as `CDSE_CLIENT_ID`. Use one of those two keys, not both.
+- Set `header` to the HTTP header name the server reads, such as `X-CDSE-Client-Id`.
 - `url` on a credential is the page where the user copies that value. `secret: true` means the UI masks it.
-- A child account repeats the same keys inside a nested `services` list. Header and variable names stay unique on one server.
+- A child account repeats the same keys inside a nested `services` list. Header names stay unique on one server.
 - Do not put a real client id or secret in this file.
 
 ### 6. Add `CITATION.cff` (attribution)
@@ -377,22 +377,24 @@ To request new secrets, open an issue or contact a maintainer with:
 
 ### User accounts (`environment.yaml`)
 
-When a person must bring their own account, describe it in `servers/<name>/environment.yaml`. The platform reads that file, shows `label` and `help`, links to `url`, and sends the value under `header` or `variable`. The file is the source of those names. See [Create `environment.yaml`](#5-create-environmentyaml-if-a-user-must-supply-an-account).
+When a person must bring their own account, describe it in `servers/<name>/environment.yaml`. The platform reads that file, shows `label` and `help`, links to `url`, and sends the value under `header`. The file is the source of those names. See [Create `environment.yaml`](#5-create-environmentyaml-if-a-user-must-supply-an-account).
 
-EFFIS sends Copernicus credentials as request headers. The CDSE server reads `CDSE_CLIENT_ID` and `CDSE_CLIENT_SECRET` from its environment.
+CDSE and EFFIS both read `X-CDSE-Client-Id` and `X-CDSE-Client-Secret` from the request. Neither server reads `CDSE_CLIENT_ID` or `CDSE_CLIENT_SECRET`.
 
 ### Per-Request Credential Headers (Proxy Mode)
 
-MCP clients can supply their own upstream API credentials via custom HTTP headers so the server acts as a proxy using the caller's own accounts. When these headers are absent (e.g. stdio transport, or headers not sent), most servers fall back to server-level env vars. EFFIS does not: `compute_metrics` reads only `X-CDSE-Client-Id` and `X-CDSE-Client-Secret`, and `servers/effis` has no `.env.template`.
+MCP clients can supply their own upstream API credentials via custom HTTP headers so the server acts as a proxy using the caller's own accounts. When these headers are absent (e.g. stdio transport, or headers not sent), most servers fall back to server-level env vars. CDSE and EFFIS do not: they read only `X-CDSE-Client-Id` and `X-CDSE-Client-Secret`.
 
 This pattern allows multiple users to share a single deployed server while each using their own API credentials.
 
-**Resolution order:** per-request headers, then server env vars. EFFIS stops after the headers.
+**Resolution order:** per-request headers, then server env vars. CDSE and EFFIS stop after the headers.
 
 #### Supported headers by server
 
 | Server | Header | Purpose |
 |--------|--------|---------|
+| `cdse` | `X-CDSE-Client-Id` | Copernicus Data Space OAuth client ID |
+| `cdse` | `X-CDSE-Client-Secret` | Copernicus Data Space OAuth client secret |
 | `effis` | `X-CDSE-Client-Id` | Copernicus Data Space OAuth client ID |
 | `effis` | `X-CDSE-Client-Secret` | Copernicus Data Space OAuth client secret |
 | `eve_retrieval` | `X-EVE-Token` | EVE API key or pre-obtained access token |
@@ -559,7 +561,7 @@ Copy this checklist into your PR description:
 - [ ] No `.env` files, credentials, or keys committed (only `.env.template`)
 - [ ] No hardcoded secrets in source code (use `os.environ` / `os.getenv`)
 - [ ] `.env.template` uses `${PLACEHOLDER}` syntax for secrets (if applicable)
-- [ ] `environment.yaml` lists each user account, with `header` or `variable`, and no secret values (if applicable)
+- [ ] `environment.yaml` lists each user account, with `header`, and no secret values (if applicable)
 - [ ] No files larger than 5 MB
 - [ ] Local test passes (`python test.py` or manual curl test)
 - [ ] Docker build succeeds (`docker buildx build -f shared/Dockerfile --build-context runtime=shared servers/my-server/`)

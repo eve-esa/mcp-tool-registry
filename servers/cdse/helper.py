@@ -29,6 +29,7 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+from mcp.server.lowlevel.server import request_ctx
 from oauthlib.oauth2 import BackendApplicationClient
 from requests_oauthlib import OAuth2Session
 
@@ -72,10 +73,36 @@ def _write_image(path: Path, image_bytes: bytes) -> tuple[str, int]:
     path.write_bytes(image_bytes)
     return str(path.resolve()), len(image_bytes)
 
-def _get_token() -> str:
+def _request_headers() -> dict[str, str]:
+    """Return the current HTTP headers, or {} when the call has no request.
 
-    client_id =  os.environ.get("CDSE_CLIENT_ID", "")
-    client_secret =  os.environ.get("CDSE_CLIENT_SECRET", "")
+    ``request_ctx`` is the context var MCP sets for the tool call. Starlette
+    stores header names in lower case. Stdio leaves the var unset.
+    """
+    try:
+        request = request_ctx.get().request
+    except LookupError:
+        return {}
+    if request is None or not hasattr(request, "headers"):
+        return {}
+    return {str(name).lower(): str(value) for name, value in request.headers.items()}
+
+
+def _cdse_credentials() -> tuple[str, str]:
+    """Read the Copernicus client from the request headers."""
+    headers = _request_headers()
+    client_id = headers.get("x-cdse-client-id", "")
+    client_secret = headers.get("x-cdse-client-secret", "")
+    if not client_id or not client_secret:
+        raise RuntimeError(
+            "CDSE credentials not set. Send HTTP headers "
+            "X-CDSE-Client-Id and X-CDSE-Client-Secret."
+        )
+    return client_id, client_secret
+
+
+def _get_token() -> str:
+    client_id, client_secret = _cdse_credentials()
     client = BackendApplicationClient(client_id=client_id)
     oauth = OAuth2Session(client=client)
     token = oauth.fetch_token(

@@ -4,15 +4,9 @@ MCP server exposing each Sentinel Hub collection as a separate tool.
 Run with:
     python server.py
 
-Or via stdio transport (for use in MCP clients / Claude Desktop):
-    {
-        "command": "python",
-        "args": ["/path/to/server.py"],
-        "env": {
-            "CDSE_CLIENT_ID": "...",
-            "CDSE_CLIENT_SECRET": "..."
-        }
-    }
+Copernicus credentials arrive on the HTTP request:
+    X-CDSE-Client-Id and X-CDSE-Client-Secret.
+    The server does not read CDSE_CLIENT_ID or CDSE_CLIENT_SECRET.
 
 Each tool returns:
   - An ImageContent block containing the JPEG as base64
@@ -503,9 +497,11 @@ if __name__ == "__main__":
         default="streamable-http",
         help="Transport type (default: streamable-http)",
     )
+    parser.add_argument("--port", type=int, default=8000, help="Port for streamable-http")
     args = parser.parse_args()
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")
     else:
+        mcp.settings.port = args.port
         mcp.run(transport="streamable-http")

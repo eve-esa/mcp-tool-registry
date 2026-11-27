@@ -2,13 +2,15 @@ import argparse
 import asyncio
 import base64
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from mcp.client.session import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
 
 load_dotenv()
 
@@ -257,50 +259,77 @@ async def main():
 
     print(head(f"Running {len(selected)} test(s)  →  output: {OUT_DIR}/"))
 
-    params = StdioServerParameters(
-        command="python",
-        args=[SERVER, "--transport", "stdio"],
-        env={
-            **os.environ,
-            "CDSE_CLIENT_ID":     os.environ["CDSE_CLIENT_ID"],
-            "CDSE_CLIENT_SECRET": os.environ["CDSE_CLIENT_SECRET"],
-        },
+    client_id = os.environ["CDSE_CLIENT_ID"]
+    client_secret = os.environ["CDSE_CLIENT_SECRET"]
+    port = 8123
+    server_env = {k: v for k, v in os.environ.items() if not k.startswith("CDSE_CLIENT_")}
+    proc = subprocess.Popen(
+        [sys.executable, SERVER, "--transport", "streamable-http", "--port", str(port)],
+        env=server_env,
+        cwd=str(Path(__file__).parent),
     )
+    headers = {
+        "X-CDSE-Client-Id": client_id,
+        "X-CDSE-Client-Secret": client_secret,
+    }
 
     passed = failed = 0
-
-    async with stdio_client(params) as (r, w):
-        async with ClientSession(r, w) as session:
-            await session.initialize()
-
-            tools = await session.list_tools()
-            available_tools = {t.name for t in tools.tools}
-            print(info(f"Available tools: {', '.join(sorted(available_tools))}"))
-
-            for key, label, tool_name, kwargs in selected:
-                print(head(f"[{key}]  {label}"))
-
-                if tool_name not in available_tools:
-                    print(err(f"Tool '{tool_name}' not available — skipping"))
-                    failed += 1
-                    continue
-
-                t0 = time.perf_counter()
+    try:
+        deadline = time.monotonic() + 20
+        async with httpx.AsyncClient() as probe:
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise RuntimeError(f"CDSE server exited {proc.returncode}")
                 try:
-                    result = await session.call_tool(tool_name, kwargs)
-                    # print(result)
-                    elapsed = time.perf_counter() - t0
-                    print(info(f"completed in {elapsed:.1f}s"))
-                    # _save_result(result, key)
-                    if _save_result(result, key):  # ← was: _save_result(...); passed += 1
-                        passed += 1
-                    else:
-                        failed += 1
+                    resp = await probe.get(f"http://127.0.0.1:{port}/mcp")
+                    if resp.status_code < 500:
+                        break
+                except httpx.ConnectError:
+                    await asyncio.sleep(0.3)
+            else:
+                raise TimeoutError("CDSE server did not start")
 
-                except Exception as exc:
-                    elapsed = time.perf_counter() - t0
-                    print(err(f"FAILED after {elapsed:.1f}s: {exc}"))
-                    failed += 1
+        async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(120)) as http:
+            async with streamable_http_client(
+                f"http://127.0.0.1:{port}/mcp",
+                http_client=http,
+            ) as (r, w, _):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+
+                    tools = await session.list_tools()
+                    available_tools = {t.name for t in tools.tools}
+                    print(info(f"Available tools: {', '.join(sorted(available_tools))}"))
+
+                    for key, label, tool_name, kwargs in selected:
+                        print(head(f"[{key}]  {label}"))
+
+                        if tool_name not in available_tools:
+                            print(err(f"Tool '{tool_name}' not available — skipping"))
+                            failed += 1
+                            continue
+
+                        t0 = time.perf_counter()
+                        try:
+                            result = await session.call_tool(tool_name, kwargs)
+                            elapsed = time.perf_counter() - t0
+                            print(info(f"completed in {elapsed:.1f}s"))
+                            if _save_result(result, key):
+                                passed += 1
+                            else:
+                                failed += 1
+                        except Exception as exc:
+                            elapsed = time.perf_counter() - t0
+                            print(err(f"FAILED after {elapsed:.1f}s: {exc}"))
+                            failed += 1
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
     # ── Summary ───────────────────────────────────────────────────────────────
     total = passed + failed
