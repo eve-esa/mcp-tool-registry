@@ -1,0 +1,25 @@
+services:
+  - id: cdse
+    label: Copernicus Data Space
+    provider: Sentinel Hub
+    url: https://dataspace.copernicus.eu/
+    tools:
+      - fetch_sentinel1_grd
+      - fetch_sentinel2
+      - fetch_sentinel3_olci
+      - fetch_sentinel3_slstr
+      - fetch_sentinel3_syn_l2
+      - fetch_sentinel5p_l2
+      - fetch_landsat_ot_l1
+      - fetch_dem
+    credentials:
+      - variable: CDSE_CLIENT_ID
+        label: Copernicus client ID
+        help: OAuth client id from the Sentinel Hub dashboard.
+        url: https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
+        secret: false
+      - variable: CDSE_CLIENT_SECRET
+        label: Copernicus client secret
+        help: OAuth client secret from the Sentinel Hub dashboard.
+        url: https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
+        secret: true
