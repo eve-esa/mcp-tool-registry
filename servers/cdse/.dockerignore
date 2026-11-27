@@ -1,0 +1,2 @@
+# Copernicus credentials arrive as request headers. Do not copy a local .env.
+.env
