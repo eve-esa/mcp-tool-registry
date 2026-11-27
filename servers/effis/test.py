@@ -10,8 +10,9 @@ Three test tiers:
   2. get_effis_burnt_areas  — free (EFFIS WFS), no credentials needed
   3. compute_metrics        — requires CDSE credentials (skipped if absent)
 
-Credentials come from .env / env vars by default.  Override them from
-the command line to test the per-request header proxy flow.
+CDSE credentials are sent only as HTTP headers. Pass them on the
+command line, or export CDSE_CLIENT_ID and CDSE_CLIENT_SECRET in the
+shell that launches this test. The server process does not receive them.
 
 Usage:
     # Quick test (tools 1 & 2 only — no CDSE credentials needed):
@@ -81,8 +82,13 @@ def _print_result(result) -> dict | None:
 
 
 def _start_server(port: int, env_overrides: dict[str, str]) -> subprocess.Popen:
-    """Launch server.py as a subprocess on the given port."""
-    env = {**os.environ, **env_overrides}
+    """Launch server.py as a subprocess on the given port.
+
+    CDSE credentials stay off the server process. The client sends them
+    as headers.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CDSE_")}
+    env.update(env_overrides)
     proc = subprocess.Popen(
         [sys.executable, str(SERVER_PY), "--transport", "http", "--port", str(port)],
         env=env,
@@ -398,9 +404,9 @@ Examples:
 
     cred_group = parser.add_argument_group(
         "credentials",
-        "CDSE credentials for compute_metrics (otherwise loaded from .env / env vars). "
-        "When provided, they are sent both as env vars to the server and as HTTP "
-        "headers to the MCP client to test the credential proxy flow.",
+        "CDSE credentials for compute_metrics. Sent as HTTP headers only. "
+        "When omitted, CDSE_CLIENT_ID and CDSE_CLIENT_SECRET from this process "
+        "are sent as those headers. The server process never receives them.",
     )
     cred_group.add_argument("--cdse-client-id", default=None,
                             help="CDSE OAuth client ID")
@@ -420,19 +426,13 @@ Examples:
     cdse_secret = args.cdse_client_secret or os.getenv("CDSE_CLIENT_SECRET", "")
     run_metrics = bool(cdse_id and cdse_secret)
 
-    # Build env overrides for the server subprocess
+    # The server ignores CDSE env vars. Credentials travel as headers.
     env_overrides: dict[str, str] = {}
-    if args.cdse_client_id:
-        env_overrides["CDSE_CLIENT_ID"] = args.cdse_client_id
-    if args.cdse_client_secret:
-        env_overrides["CDSE_CLIENT_SECRET"] = args.cdse_client_secret
-
-    # Build custom headers for the MCP client (per-request credential proxy)
     headers: dict[str, str] = {"Content-Type": "application/json"}
-    if args.cdse_client_id:
-        headers["X-CDSE-Client-Id"] = args.cdse_client_id
-    if args.cdse_client_secret:
-        headers["X-CDSE-Client-Secret"] = args.cdse_client_secret
+    if cdse_id:
+        headers["X-CDSE-Client-Id"] = cdse_id
+    if cdse_secret:
+        headers["X-CDSE-Client-Secret"] = cdse_secret
 
     # --- Start server, run tests, stop server ---
     _section("Starting Fire Detection MCP Server")

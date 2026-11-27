@@ -52,6 +52,7 @@ Each server directory contains:
 | `requirements.txt` | Yes | pip dependencies with version constraints |
 | `CITATION.cff` | Yes | Authors and citation metadata in [Citation File Format](https://citation-file-format.github.io/) 1.2.0 |
 | `README.md` | No | Server docs; created or extended after merge with an Authors and Citation section from `CITATION.cff` |
+| `environment.yaml` | No | User-facing accounts: labels, links, and the header or variable name to send |
 | `.env.template` | No | Secret placeholders; CI substitutes them at deploy time |
 | `test.py` | No (recommended) | Local test script |
 
@@ -211,7 +212,40 @@ MY_API_URL=https://api.example.com
 
 Never put actual secret values in this file. See [Secrets and Environment Variables](#secrets-and-environment-variables) for how to get them added.
 
-### 5. Add `CITATION.cff` (attribution)
+### 5. Create `environment.yaml` (if a user must supply an account)
+
+This file tells the platform what to show and which name to send. It holds no secret values. Omit it when every tool works without a user account. See `servers/effis/environment.yaml` and `servers/cdse/environment.yaml`.
+
+`.env.template` puts a secret into the server image. `environment.yaml` describes an account the user provides. A server can have one file, both, or neither.
+
+```yaml
+services:
+  - id: cdse
+    label: Copernicus Data Space
+    provider: Sentinel Hub
+    url: https://dataspace.copernicus.eu/
+    tools:
+      - compute_metrics
+    credentials:
+      - header: X-CDSE-Client-Id
+        label: Copernicus client ID
+        help: OAuth client id from the Sentinel Hub dashboard.
+        url: https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
+        secret: false
+```
+
+Rules:
+
+- `services` is a list. One entry is one upstream account. A second account is a second entry.
+- `id` is a stable slug. `label` is the name in the UI. `provider` is who issues the account. `url` is the account home.
+- `tools` lists the MCP tool names that need this account. A tool missing from every list needs no account.
+- `credentials` is the fields the user fills in. Each item has `label`, `help`, `url`, and `secret`.
+- Set `header` to the HTTP header name the server reads, such as `X-CDSE-Client-Id`. Set `variable` to the environment variable the server reads, such as `CDSE_CLIENT_ID`. Use one of those two keys, not both.
+- `url` on a credential is the page where the user copies that value. `secret: true` means the UI masks it.
+- A child account repeats the same keys inside a nested `services` list. Header and variable names stay unique on one server.
+- Do not put a real client id or secret in this file.
+
+### 6. Add `CITATION.cff` (attribution)
 
 Every server credits its authors in a `CITATION.cff` file written in [Citation File Format (CFF) 1.2.0](https://github.com/citation-file-format/citation-file-format/blob/1.2.0/schema-guide.md). It is plain YAML that both people and tools can read. We use it to credit you in the server README and, later, in the registry UI. See `servers/effis/CITATION.cff` for a real example.
 
@@ -246,7 +280,7 @@ Rules:
 - Only keys defined by CFF are allowed. CI rejects unknown keys and badly formatted values, such as an ORCID without `https://orcid.org/`.
 - The [cffinit](https://citation-file-format.github.io/cffinit/) web form can generate the file for you.
 
-### 6. `README.md` (written for you)
+### 7. `README.md` (written for you)
 
 The README's Authors and Citation section is generated from `CITATION.cff`. You do not need to do anything: after your PR is merged, the [Sync server READMEs](.github/workflows/sync-readmes.yml) workflow writes it and commits it to `main`.
 
@@ -262,11 +296,11 @@ python scripts/citation.py servers/my-server
 
 CI shows a warning, not an error, when the README in your PR is out of date.
 
-### 7. Write `test.py` (recommended)
+### 8. Write `test.py` (recommended)
 
 Create a test script that imports your tools and exercises them locally. See `servers/eve_retrieval/test.py` for an example.
 
-### 8. Test locally
+### 9. Test locally
 
 ```bash
 # stdio mode (for Cursor, Claude Desktop, etc.)
@@ -279,7 +313,7 @@ python server.py --transport http
 curl http://localhost:8000/mcp
 ```
 
-### 9. Test the Docker build
+### 10. Test the Docker build
 
 ```bash
 # From the repository root
@@ -288,7 +322,7 @@ docker buildx build -f shared/Dockerfile --build-context runtime=shared servers/
 
 This uses the same Dockerfile that CI uses. If it builds locally, it will build in CI.
 
-### 10. Submit your PR
+### 11. Submit your PR
 
 Create a branch, commit your server directory, and open a PR against `main`. The automated checks will run and report any issues.
 
@@ -341,13 +375,19 @@ To request new secrets, open an issue or contact a maintainer with:
 - Where to obtain the value
 - Which server needs it
 
+### User accounts (`environment.yaml`)
+
+When a person must bring their own account, describe it in `servers/<name>/environment.yaml`. The platform reads that file, shows `label` and `help`, links to `url`, and sends the value under `header` or `variable`. The file is the source of those names. See [Create `environment.yaml`](#5-create-environmentyaml-if-a-user-must-supply-an-account).
+
+EFFIS sends Copernicus credentials as request headers. The CDSE server reads `CDSE_CLIENT_ID` and `CDSE_CLIENT_SECRET` from its environment.
+
 ### Per-Request Credential Headers (Proxy Mode)
 
-MCP clients can supply their own upstream API credentials via custom HTTP headers so the server acts as a proxy using the caller's own accounts. When these headers are absent (e.g. stdio transport, or headers not sent), the server falls back to server-level env vars.
+MCP clients can supply their own upstream API credentials via custom HTTP headers so the server acts as a proxy using the caller's own accounts. When these headers are absent (e.g. stdio transport, or headers not sent), most servers fall back to server-level env vars. EFFIS does not: `compute_metrics` reads only `X-CDSE-Client-Id` and `X-CDSE-Client-Secret`, and `servers/effis` has no `.env.template`.
 
 This pattern allows multiple users to share a single deployed server while each using their own API credentials.
 
-**Resolution order:** per-request headers → server env vars.
+**Resolution order:** per-request headers, then server env vars. EFFIS stops after the headers.
 
 #### Supported headers by server
 
@@ -519,6 +559,7 @@ Copy this checklist into your PR description:
 - [ ] No `.env` files, credentials, or keys committed (only `.env.template`)
 - [ ] No hardcoded secrets in source code (use `os.environ` / `os.getenv`)
 - [ ] `.env.template` uses `${PLACEHOLDER}` syntax for secrets (if applicable)
+- [ ] `environment.yaml` lists each user account, with `header` or `variable`, and no secret values (if applicable)
 - [ ] No files larger than 5 MB
 - [ ] Local test passes (`python test.py` or manual curl test)
 - [ ] Docker build succeeds (`docker buildx build -f shared/Dockerfile --build-context runtime=shared servers/my-server/`)

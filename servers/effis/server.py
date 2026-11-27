@@ -21,7 +21,6 @@ Requirements:
     pip install fastmcp==4.1.8 httpx pyshp python-dotenv
 
 Environment (optional ``effis/.env`` — loaded automatically):
-    CDSE_CLIENT_ID, CDSE_CLIENT_SECRET — Copernicus Data Space / Sentinel Hub OAuth
     EFFIS_SHAPEFILE_DIR — path to local EFFIS ``modis.ba.poly`` shapefile directory
     EFFIS_SAVE_DIR — directory for output files. The default is a folder named
         effis under the system temp dir. The platform attaches each file whose
@@ -81,14 +80,7 @@ EFFIS_OWS = "https://maps.effis.emergency.copernicus.eu/effis"
 # CDSE Sentinel Hub (Copernicus Data Space Ecosystem)
 # Register at https://dataspace.copernicus.eu/ then create OAuth credentials
 # at https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
-def _cdse_client_id() -> str:
-    return os.getenv("CDSE_CLIENT_ID", "")
-
-
-def _cdse_client_secret() -> str:
-    return os.getenv("CDSE_CLIENT_SECRET", "")
-
-
+# compute_metrics reads those credentials from the request headers only.
 CDSE_TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 CDSE_PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
 
@@ -120,16 +112,14 @@ mcp = FastMCP("Fire Detection Server")
 
 
 # ---------------------------------------------------------------------------
-# Per-request credential resolution (header → env fallback)
+# Per-request credential resolution
 # ---------------------------------------------------------------------------
-# MCP clients can supply upstream API credentials via custom HTTP headers so
-# the server acts as a proxy using the caller's own accounts.  When headers
-# are absent (e.g. stdio transport or header not sent) the server falls back
-# to the process-level env vars (CDSE_CLIENT_ID / CDSE_CLIENT_SECRET).
-#
-# Supported headers:
+# compute_metrics authenticates to CDSE with the caller's own account.
+# The only source is the current HTTP request:
 #   X-CDSE-Client-Id      — Copernicus Data Space client ID
 #   X-CDSE-Client-Secret  — Copernicus Data Space client secret
+# There is no server-level CDSE secret. Stdio has no headers, so the tool
+# returns cdse_auth.
 
 
 def _get_request_headers() -> dict[str, str]:
@@ -142,10 +132,10 @@ def _get_request_headers() -> dict[str, str]:
 
 
 def _resolve_cdse_creds() -> tuple[str, str]:
-    """Resolve CDSE credentials: prefer per-request headers, fall back to env."""
+    """Resolve CDSE credentials from the current request headers."""
     headers = _get_request_headers()
-    cid = headers.get("x-cdse-client-id", "") or _cdse_client_id()
-    csec = headers.get("x-cdse-client-secret", "") or _cdse_client_secret()
+    cid = headers.get("x-cdse-client-id", "")
+    csec = headers.get("x-cdse-client-secret", "")
     return cid, csec
 
 
@@ -1118,8 +1108,8 @@ async def _cdse_get_token(
     """Get an OAuth2 access token from CDSE.
 
     When *client_id* / *client_secret* are supplied they are used directly;
-    otherwise credentials are resolved via ``_resolve_cdse_creds()`` (HTTP
-    request headers first, then env vars).
+    otherwise credentials are resolved via ``_resolve_cdse_creds()``
+    (``X-CDSE-Client-Id`` and ``X-CDSE-Client-Secret``).
     """
     cid = client_id or _resolve_cdse_creds()[0]
     csec = client_secret or _resolve_cdse_creds()[1]
@@ -2136,9 +2126,8 @@ async def compute_metrics(
     if not cdse_cid or not cdse_csec:
         return [_text_block(_tool_error(
             "cdse_auth",
-            "CDSE credentials not set. Either send them as HTTP "
-            "headers (X-CDSE-Client-Id / X-CDSE-Client-Secret) or "
-            "set CDSE_CLIENT_ID / CDSE_CLIENT_SECRET env vars on the server.",
+            "CDSE credentials not set. Send HTTP headers "
+            "X-CDSE-Client-Id and X-CDSE-Client-Secret.",
         ))]
 
     try:

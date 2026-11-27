@@ -32,7 +32,7 @@ Anyone building EO agents can run these servers locally or contribute a new one.
 | Server | What it does | Tools | Credentials |
 |---|---|---|---|
 | [`cdse`](servers/cdse) | Sentinel-1, -2, -3, -5P, Landsat and DEM imagery from the Copernicus Data Space Ecosystem (Sentinel Hub) | `fetch_sentinel1_grd`, `fetch_sentinel2`, `fetch_sentinel3_olci`, `fetch_sentinel3_slstr`, `fetch_sentinel3_syn_l2`, `fetch_sentinel5p_l2`, `fetch_landsat_ot_l1`, `fetch_dem` | CDSE client |
-| [`effis`](servers/effis) | Burnt areas from EFFIS and Sentinel-2 burn metrics (NDVI, NBR, BAIS2) | `geocode_place`, `get_effis_burnt_areas`, `compute_metrics` | CDSE client |
+| [`effis`](servers/effis) | Burnt areas from EFFIS and Sentinel-2 burn metrics (NDVI, NBR, BAIS2) | `geocode_place`, `get_effis_burnt_areas`, `compute_metrics` | CDSE headers |
 | [`eodashboard`](servers/eodashboard) | ESA / NASA / JAXA EO Dashboard narratives and indicators, resolved to STAC items | `list_narratives`, `search_narratives`, `get_narrative_content`, `list_themes`, `get_narrative_indicators`, `search_collections`, `get_collection_items`, `find_narratives_for_indicator` | none |
 | [`eotdl`](servers/eotdl) | Search datasets, models and pipelines on the EO Training Data Lab | `eotdl_search` | none |
 | [`esa_moocs`](servers/esa_moocs) | Semantic search over ESA Earth Observation MOOC transcripts | `search_moocs` | none |
