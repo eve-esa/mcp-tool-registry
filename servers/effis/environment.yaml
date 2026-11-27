@@ -1,0 +1,18 @@
+services:
+  - id: cdse
+    label: Copernicus Data Space
+    provider: Sentinel Hub
+    url: https://dataspace.copernicus.eu/
+    tools:
+      - compute_metrics
+    credentials:
+      - header: X-CDSE-Client-Id
+        label: Copernicus client ID
+        help: OAuth client id from the Sentinel Hub dashboard.
+        url: https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
+        secret: false
+      - header: X-CDSE-Client-Secret
+        label: Copernicus client secret
+        help: OAuth client secret from the Sentinel Hub dashboard.
+        url: https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
+        secret: true

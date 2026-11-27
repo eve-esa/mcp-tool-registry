@@ -13,8 +13,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Includes .env when the deploy workflow has replaced the .env.template
-# placeholders. .dockerignore must not exclude that file.
+# .dockerignore excludes .env. CDSE credentials are request headers, not image env.
 COPY . .
 COPY --from=runtime eve_mcp_runtime /app/eve_mcp_runtime
 
